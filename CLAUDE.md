@@ -125,7 +125,9 @@ that need them throw at request time if unset.
 ### Database setup
 
 Run `database/schema.sql` once in the Supabase SQL Editor, then create the
-public `blog-images` storage bucket. See `database/README.md`.
+public `blog-images` storage bucket. The file refuses to run against a
+medblog-ai database; `database/migrate-from-medblog.sql` converts one in place
+instead. See `database/README.md`.
 
 The app uses `supabaseAdmin` (service role key) for all server-side DB
 operations, bypassing RLS. RLS is enabled with no permissive policies as a

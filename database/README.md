@@ -1,14 +1,35 @@
 # Database
 
-`schema.sql` is the whole schema. Run it once in the Supabase SQL Editor
-against a fresh project, then create the `blog-images` storage bucket
-(public) as the file's last section describes.
+## A fresh project
 
-There are no incremental migrations yet — this project starts from one
-schema. When the first change lands, add a numbered file here
-(`001_*.sql`) and keep `schema.sql` as the current full picture.
+`schema.sql` is the whole schema. Run it once in the Supabase SQL Editor,
+then create a **public** storage bucket named `blog-images`.
 
-To create the first admin account:
+It starts with a preflight check that aborts if the database already holds a
+medblog-ai schema, rather than half-applying itself. If you hit that error,
+see below.
+
+## Reusing the medblog-ai database
+
+`migrate-from-medblog.sql` converts a medblog-ai database into a blog-ai one
+in place: `hospitals` → `tenants`, the two different `hospital_id` columns
+into `login_id` and `tenant_id`, plus the new `vertical` column (existing
+accounts land on `medical-obgyn`, so their behaviour is unchanged).
+
+**It breaks any medblog-ai deployment still pointed at that database**, the
+moment it finishes. Only run it if you are retiring medblog-ai. If both apps
+need to keep working, give blog-ai its own Supabase project.
+
+Take a backup first. The script is safe to re-run.
+
+## Migrations
+
+There is no numbered migration chain yet. When the first schema change lands,
+add `001_*.sql` here and keep `schema.sql` as the current full picture.
+
+## First admin account
+
+No admin is seeded. Create one with:
 
 ```bash
 node scripts/generate-admin-hash.js <username> <password>

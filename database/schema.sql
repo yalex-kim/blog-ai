@@ -9,6 +9,28 @@
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
+-- Preflight: refuse to run against a medblog-ai database
+-- ---------------------------------------------------------------------------
+-- Every CREATE below says IF NOT EXISTS, which is right for re-running this
+-- file against its own schema and badly wrong against the older medblog-ai
+-- one: the tables would be skipped as "already there" while the indexes and
+-- columns underneath them fail one at a time, leaving a half-applied mess.
+-- Fail loudly on the first statement instead.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'hospitals'
+  ) OR EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'blog_posts' AND column_name = 'hospital_id'
+  ) THEN
+    RAISE EXCEPTION
+      'This database already holds a medblog-ai schema. Use a separate Supabase project for blog-ai, or run database/migrate-from-medblog.sql to convert this one in place (which will break any medblog-ai deployment still pointed at it).';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- tenants — one row per customer account
 -- ---------------------------------------------------------------------------
 -- `vertical` names the industry pack under lib/verticals/packs. It decides the
