@@ -82,6 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_blog_images_order ON blog_images(blog_post_id, di
 -- this backfill is housekeeping rather than a correctness fix.
 UPDATE blog_images SET image_type = 'EXPLAINER' WHERE image_type = 'MEDICAL';
 
+-- --- admins ----------------------------------------------------------------
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS full_name TEXT;
+
 -- --- RLS -------------------------------------------------------------------
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admins ENABLE ROW LEVEL SECURITY;

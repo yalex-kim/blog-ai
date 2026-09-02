@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS admins (
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'admin',
+  -- Display name only; the login route echoes it back so the admin UI can
+  -- greet a person rather than a username.
+  full_name TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
