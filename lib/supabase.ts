@@ -22,8 +22,10 @@ export interface Tenant {
   id: string;
   login_id: string;
   password_hash: string;
+  /** Industry pack id — see lib/verticals/registry.ts */
+  vertical: string;
   name: string | null;
-  category: string;
+  category: string | null;
   main_services: string[] | null;
   address: string | null;
   trusted_domains: string[] | null;
@@ -39,16 +41,14 @@ export interface Tenant {
 
 export interface BlogPost {
   id: string;
-  login_id: string;
-  title: string;
+  tenant_id: string;
+  title: string | null;
   content: string;
-  topic: string;
+  topic: string | null;
   keywords: string[] | null;
   image_keywords: string[] | null;
   reference_links: { title: string; url: string; snippets?: string[] }[] | null;
-  category: '정보성' | '홍보성' | null;
   posted_to_blog: boolean;
-  posted_at: string | null;
   created_at: string;
 }
 
