@@ -109,8 +109,8 @@ lives in `lib/parse-image-suggestions.ts` — change the format there, not inlin
 
 ```
 NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=   # Supabase's "publishable key" (sb_publishable_…)
+SUPABASE_SERVICE_ROLE_KEY=       # Supabase's "secret key" (sb_secret_…) — server only
 SESSION_SECRET=                  # signs session cookies (openssl rand -base64 48)
 BLOG_CREDENTIAL_ENCRYPTION_KEY=  # encrypts tenants' blog platform passwords at rest
 ANTHROPIC_API_KEY=
