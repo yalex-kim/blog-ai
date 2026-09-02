@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
       !initial_password || typeof initial_password !== 'string' || initial_password.length < 8
     ) {
       return NextResponse.json(
-        { error: '병원 ID와 8자 이상의 초기 비밀번호를 입력해주세요.' },
+        { error: '로그인 ID와 8자 이상의 초기 비밀번호를 입력해주세요.' },
         { status: 400 }
       );
     }
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
 
     if (existing) {
       return NextResponse.json(
-        { error: '이미 존재하는 병원 ID입니다.' },
+        { error: '이미 존재하는 로그인 ID입니다.' },
         { status: 409 }
       );
     }
@@ -80,13 +80,13 @@ export async function POST(request: NextRequest) {
     if (error) {
       console.error('Error creating tenant:', error);
       return NextResponse.json(
-        { error: '병원 계정 생성 중 오류가 발생했습니다.' },
+        { error: '계정 생성 중 오류가 발생했습니다.' },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
-      message: '병원 계정이 생성되었습니다.',
+      message: '계정이 생성되었습니다.',
       tenant: {
         id: data.id,
         login_id: data.login_id,
@@ -122,7 +122,7 @@ export async function GET(request: NextRequest) {
     if (error) {
       console.error('Error fetching tenants:', error);
       return NextResponse.json(
-        { error: '병원 목록 조회 중 오류가 발생했습니다.' },
+        { error: '계정 목록 조회 중 오류가 발생했습니다.' },
         { status: 500 }
       );
     }

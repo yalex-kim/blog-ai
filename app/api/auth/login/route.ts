@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
 
     if (!login_id || !password) {
       return NextResponse.json(
-        { error: '병원 ID와 비밀번호를 입력해주세요.' },
+        { error: '로그인 ID와 비밀번호를 입력해주세요.' },
         { status: 400 }
       );
     }
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 
     if (error || !tenant) {
       return NextResponse.json(
-        { error: '병원 ID 또는 비밀번호가 올바르지 않습니다.' },
+        { error: '로그인 ID 또는 비밀번호가 올바르지 않습니다.' },
         { status: 401 }
       );
     }
@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
 
     if (!isValid) {
       return NextResponse.json(
-        { error: '병원 ID 또는 비밀번호가 올바르지 않습니다.' },
+        { error: '로그인 ID 또는 비밀번호가 올바르지 않습니다.' },
         { status: 401 }
       );
     }

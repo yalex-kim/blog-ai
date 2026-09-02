@@ -28,7 +28,7 @@ export async function GET(
 
     if (error || !tenant) {
       return NextResponse.json(
-        { error: '병원을 찾을 수 없습니다.' },
+        { error: '계정을 찾을 수 없습니다.' },
         { status: 404 }
       );
     }
@@ -117,7 +117,7 @@ export async function PUT(
     if (error) {
       console.error('Error updating tenant:', error);
       return NextResponse.json(
-        { error: '병원 정보 업데이트에 실패했습니다.' },
+        { error: '계정 정보 업데이트에 실패했습니다.' },
         { status: 500 }
       );
     }

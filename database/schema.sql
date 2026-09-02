@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS admins (
   -- Display name only; the login route echoes it back so the admin UI can
   -- greet a person rather than a username.
   full_name TEXT,
+  -- The login lookup filters on this, so a disabled admin cannot sign in even
+  -- with the right password. Revoking access is an UPDATE, not a DELETE, which
+  -- keeps the account's history intact.
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  last_login_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

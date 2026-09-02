@@ -22,11 +22,13 @@ VALUES (
   'System Administrator'
 );
 
--- Confirm it took. `password_ok` must come back true; if it is false, the
--- password you typed here and the one you will type at /admin/login differ.
+-- Confirm it took. Both columns must come back true: the login lookup filters
+-- on is_active before it ever checks the password, so an inactive admin fails
+-- with the same "wrong ID or password" 401 as a bad password.
 SELECT
   username,
   role,
+  is_active,
   password_hash = crypt('CHANGE_ME', password_hash) AS password_ok
 FROM admins
 WHERE username = 'admin';

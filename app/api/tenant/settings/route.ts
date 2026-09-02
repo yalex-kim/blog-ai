@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
 
     if (error || !tenant) {
       return NextResponse.json(
-        { error: '병원 정보를 찾을 수 없습니다.' },
+        { error: '계정 정보를 찾을 수 없습니다.' },
         { status: 404 }
       );
     }

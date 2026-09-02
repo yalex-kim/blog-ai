@@ -84,6 +84,8 @@ UPDATE blog_images SET image_type = 'EXPLAINER' WHERE image_type = 'MEDICAL';
 
 -- --- admins ----------------------------------------------------------------
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
 
 -- --- RLS -------------------------------------------------------------------
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
