@@ -29,10 +29,12 @@ add `001_*.sql` here and keep `schema.sql` as the current full picture.
 
 ## First admin account
 
-No admin is seeded. Create one with:
+No admin is seeded. Two ways to create one:
 
-```bash
-node scripts/generate-admin-hash.js <username> <password>
-```
+**No local setup** — edit the two placeholders in `create-admin.sql` and run it
+in the SQL Editor. Postgres hashes the password itself via pgcrypto.
 
-and run the `INSERT` it prints. See `ADMIN_SETUP.md`.
+**With a checkout** — `node scripts/generate-admin-hash.js <username> <password>`
+and run the `INSERT` it prints.
+
+Both produce a bcrypt hash the login route accepts. See `ADMIN_SETUP.md`.
