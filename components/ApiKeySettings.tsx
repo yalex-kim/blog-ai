@@ -28,7 +28,6 @@ const PROVIDER_HELP: Record<KeyStatus['provider'], { where: string; url: string 
 export default function ApiKeySettings() {
   const [statuses, setStatuses] = useState<KeyStatus[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [imageProvider, setImageProvider] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -40,7 +39,6 @@ export default function ApiKeySettings() {
       if (!response.ok) return;
       const data = await response.json();
       setStatuses(data.apiKeys ?? []);
-      setImageProvider(data.tenant?.image_provider ?? '');
     } catch (err) {
       console.error('Error loading API key settings:', err);
     } finally {
@@ -182,29 +180,6 @@ export default function ApiKeySettings() {
             </div>
           );
         })}
-
-        <div>
-          <label htmlFor="image-provider" className="block text-sm font-medium text-ink mb-2">
-            이미지 생성에 사용할 제공자
-          </label>
-          <select
-            id="image-provider"
-            value={imageProvider}
-            onChange={(e) => {
-              setImageProvider(e.target.value);
-              save(
-                { image_provider: e.target.value === '' ? null : e.target.value },
-                '이미지 제공자가 변경되었습니다.'
-              );
-            }}
-            disabled={saving}
-            className="w-full px-4 py-2 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent"
-          >
-            <option value="">기본값 사용</option>
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Google Gemini</option>
-          </select>
-        </div>
       </div>
 
       <div className="mt-6 flex justify-end">

@@ -89,7 +89,10 @@ defense-in-depth against CSRF, and login/generation endpoints should call
    `{ content, imageKeywords, references, imageSuggestions[], blogPostId }`
 
 **Image generation** (`/api/generate-images`):
-1. Loads the tenant's pack and thumbnail branding in one round trip
+1. Loads the tenant's pack, thumbnail branding and image-provider key in one
+   round trip. The provider itself comes from the request — the dashboard's
+   selector sits next to the generate button and sends it every time, so there
+   is deliberately no stored per-tenant preference to be overridden.
 2. `generateImagePrompt(pack, type, …)` builds the prompt — THUMBNAIL gets its own typographic builder, everything else uses the pack's slot template
 3. Routes to the active provider via `lib/image-providers/factory.ts`
 4. Uploads to Supabase Storage, saves metadata with `display_order` and `prompt_id`
@@ -117,7 +120,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=   # Supabase's "publishable key" (sb_publishable_
 SUPABASE_SERVICE_ROLE_KEY=       # Supabase's "secret key" (sb_secret_…) — server only
 SESSION_SECRET=                  # signs session cookies (openssl rand -base64 48)
 BLOG_CREDENTIAL_ENCRYPTION_KEY=  # encrypts tenants' blog platform passwords at rest
-IMAGE_PROVIDER=openai            # default when a tenant hasn't picked one
+IMAGE_PROVIDER=openai            # fallback only; the dashboard picks per request
 
 # Model provider keys. Optional under BYOK: they are the *fallback* for tenants
 # who have not entered their own. Leave them unset for strict BYOK.

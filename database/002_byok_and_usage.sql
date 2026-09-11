@@ -26,14 +26,14 @@ ALTER TABLE tenants ADD COLUMN IF NOT EXISTS anthropic_api_key_encrypted TEXT;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS openai_api_key_encrypted    TEXT;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS gemini_api_key_encrypted    TEXT;
 
--- Which image provider this tenant's own key is for. NULL means "follow the
--- deployment's IMAGE_PROVIDER default".
-ALTER TABLE tenants ADD COLUMN IF NOT EXISTS image_provider TEXT;
+-- No image_provider column on purpose: the dashboard picks the provider next to
+-- the generate button and sends it on every request, so a stored preference
+-- could never win. If you already ran an earlier copy of this file that added
+-- the column, it is harmless — nothing reads it — and you can drop it.
 
 COMMENT ON COLUMN tenants.anthropic_api_key_encrypted IS 'AES-256-GCM, key from BLOG_CREDENTIAL_ENCRYPTION_KEY — never stored in plaintext, never returned to a client';
 COMMENT ON COLUMN tenants.openai_api_key_encrypted    IS 'AES-256-GCM, key from BLOG_CREDENTIAL_ENCRYPTION_KEY — never stored in plaintext, never returned to a client';
 COMMENT ON COLUMN tenants.gemini_api_key_encrypted    IS 'AES-256-GCM, key from BLOG_CREDENTIAL_ENCRYPTION_KEY — never stored in plaintext, never returned to a client';
-COMMENT ON COLUMN tenants.image_provider IS 'openai | gemini | NULL to follow the IMAGE_PROVIDER env default';
 
 -- ---------------------------------------------------------------------------
 -- usage_events — one row per billable provider call

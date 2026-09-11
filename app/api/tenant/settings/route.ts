@@ -199,17 +199,6 @@ export async function PUT(request: NextRequest) {
       updateData[KEY_COLUMNS[provider]] = encryptApiKey(trimmed);
     }
 
-    if (updates.image_provider !== undefined) {
-      const requested = updates.image_provider;
-      if (requested !== null && requested !== 'openai' && requested !== 'gemini') {
-        return NextResponse.json(
-          { error: '이미지 생성 제공자가 올바르지 않습니다.' },
-          { status: 400 }
-        );
-      }
-      updateData.image_provider = requested;
-    }
-
     // Check if all required fields are filled
     const requiredFields = ['name', 'main_services', 'address', 'blog_id', 'blog_board_name'];
     const { data: currentHospital } = await supabaseAdmin

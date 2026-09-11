@@ -56,11 +56,11 @@ function isValidKeywordItem(keyword: unknown): boolean {
 // and the domain framing), THUMBNAIL cards additionally print the real tenant
 // name and neighbourhood, and BYOK needs the tenant's own image provider key.
 // One round trip covers all three, for the whole request rather than per image.
+// Which provider to call is not read here — the dashboard sends it per request.
 interface TenantImageContext {
   pack: VerticalPack;
   branding: ThumbnailBranding;
   tenant: {
-    image_provider?: string | null;
     openai_api_key_encrypted?: string | null;
     gemini_api_key_encrypted?: string | null;
   } | null;
@@ -69,7 +69,7 @@ interface TenantImageContext {
 async function loadTenantImageContext(tenantId: string): Promise<TenantImageContext> {
   const { data: tenant } = await supabaseAdmin
     .from('tenants')
-    .select(`name, address, vertical, image_provider, ${KEY_COLUMNS.openai}, ${KEY_COLUMNS.gemini}`)
+    .select(`name, address, vertical, ${KEY_COLUMNS.openai}, ${KEY_COLUMNS.gemini}`)
     .eq('id', tenantId)
     .single();
 
@@ -129,7 +129,7 @@ export async function POST(request: NextRequest) {
     // below share the pack, the branding and the tenant's key.
     const { pack, branding, tenant } = await loadTenantImageContext(sessionData.id);
 
-    const providerId = resolveImageProviderId(providerOverride, tenant?.image_provider);
+    const providerId = resolveImageProviderId(providerOverride);
     const imageKey = resolveApiKey(providerId, tenant);
     if (!imageKey) {
       return NextResponse.json({ error: missingKeyMessage(providerId) }, { status: 400 });

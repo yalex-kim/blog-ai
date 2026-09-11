@@ -21,11 +21,14 @@ export interface TenantKeyColumns {
   gemini_api_key_encrypted?: string | null;
 }
 
-export const KEY_COLUMNS: Record<KeyProvider, keyof TenantKeyColumns> = {
+// `as const` rather than a Record annotation: the annotation widens each value
+// to `keyof TenantKeyColumns`, and a select string built from a union of column
+// names makes supabase-js infer a union of row shapes instead of one row.
+export const KEY_COLUMNS = {
   anthropic: 'anthropic_api_key_encrypted',
   openai: 'openai_api_key_encrypted',
   gemini: 'gemini_api_key_encrypted',
-};
+} as const satisfies Record<KeyProvider, keyof TenantKeyColumns>;
 
 const PLATFORM_ENV_VARS: Record<KeyProvider, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
