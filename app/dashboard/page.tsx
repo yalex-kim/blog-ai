@@ -1,9 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { parseImageSuggestions } from '@/lib/parse-image-suggestions';
+import {
+  parseImageSuggestions,
+  toEditableContent,
+  fromEditableContent,
+} from '@/lib/parse-image-suggestions';
 import { ArticleBody } from '@/components/ArticleBody';
 import { ToastViewport, useToasts } from '@/components/Toast';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -121,6 +125,12 @@ export default function DashboardPage() {
   // Wall-clock for a running generation: the honest alternative to inventing
   // server-side progress the API does not report.
   const [elapsed, setElapsed] = useState(0);
+  // Lets the user abandon a generation they already know is wrong. The
+  // provider call is still billed once it has started — the saving is the
+  // minutes, not the money, and the UI says so.
+  const blogAbortRef = useRef<AbortController | null>(null);
+  // Mobile splits the result into two panes; the desktop layout shows both.
+  const [mobilePane, setMobilePane] = useState<'article' | 'images'>('article');
 
   const hasKey = (provider: string) =>
     keyStatuses.some((status) => status.provider === provider && status.configured);
@@ -235,7 +245,8 @@ export default function DashboardPage() {
   // Warn before losing work. Two cases: an edit that has not been saved, and a
   // generation the user is paying for that would be abandoned mid-flight.
   useEffect(() => {
-    const dirty = isEditMode && editedContent !== blogResult?.content;
+    const dirty =
+      isEditMode && editedContent !== toEditableContent(blogResult?.content ?? '');
     if (!dirty && !generatingBlog && !generatingImages) return;
 
     const warn = (event: BeforeUnloadEvent) => {
@@ -252,8 +263,10 @@ export default function DashboardPage() {
   // nothing. Debounced — this runs on every keystroke otherwise.
   useEffect(() => {
     if (!isEditMode || !currentPostId) return;
-    if (editedContent === blogResult?.content) return;
+    if (editedContent === toEditableContent(blogResult?.content ?? '')) return;
 
+    // Stored as the editor sees it (placeholders); restoring puts the user
+    // back in edit mode, where that is the right representation.
     const timer = setTimeout(() => saveDraft(currentPostId, editedContent), 800);
     return () => clearTimeout(timer);
   }, [isEditMode, editedContent, currentPostId, blogResult]);
@@ -350,7 +363,11 @@ export default function DashboardPage() {
     // An unsaved edit from a previous visit. Offered, never applied silently —
     // the user may have abandoned it deliberately.
     const draft = readDraft(post.id);
-    setDraftAge(draft && draft.content !== post.content ? describeDraftAge(draft.savedAt) : null);
+    setDraftAge(
+      draft && draft.content !== toEditableContent(post.content)
+        ? describeDraftAge(draft.savedAt)
+        : null
+    );
 
     // Initialize image prompts from suggestions
     setImagePrompts(imageSuggestions.length > 0 ? imageSuggestions : []);
@@ -386,11 +403,15 @@ export default function DashboardPage() {
     setIsEditMode(false);
     setCopied(false);
 
+    const controller = new AbortController();
+    blogAbortRef.current = controller;
+
     try {
       const response = await fetch('/api/generate-blog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic }),
+        signal: controller.signal,
       });
 
       if (response.ok) {
@@ -422,32 +443,47 @@ export default function DashboardPage() {
         }
       }
     } catch (error) {
-      console.error('Error generating blog:', error);
-      showToast('error', '블로그 생성 중 오류가 발생했습니다.');
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        // Only this side drops the request: the server finishes and saves, so
+        // the article is still reachable from the list. Said plainly rather
+        // than implying the work — or the charge — was undone.
+        showToast('success', '생성을 중단했습니다. 이미 시작된 글은 저장될 수 있습니다.');
+        fetchSavedPosts();
+      } else {
+        console.error('Error generating blog:', error);
+        showToast('error', '블로그 생성 중 오류가 발생했습니다.');
+      }
     } finally {
+      blogAbortRef.current = null;
       setGeneratingBlog(false);
     }
   };
+
+  const cancelBlogGeneration = () => blogAbortRef.current?.abort();
 
   const handleSaveEdit = async () => {
     if (!currentPostId) return;
 
     try {
+      // Placeholders become full markers again, taking each image's current
+      // wording from the cards — that is where descriptions are edited.
+      const contentToSave = fromEditableContent(editedContent, imagePrompts);
+
       const response = await fetch('/api/blog-posts', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: currentPostId,
-          content: editedContent,
+          content: contentToSave,
         }),
       });
 
       if (response.ok) {
-        // Re-parse image prompts from edited content
-        const imageSuggestions: ImageSuggestion[] = parseImageSuggestions(editedContent);
+        // Re-parse image prompts from the saved content
+        const imageSuggestions: ImageSuggestion[] = parseImageSuggestions(contentToSave);
 
         // Update blog result and image prompts
-        setBlogResult({ ...blogResult!, content: editedContent, imageSuggestions });
+        setBlogResult({ ...blogResult!, content: contentToSave, imageSuggestions });
         setImagePrompts(imageSuggestions);
         setIsEditMode(false);
         // The server now holds this text; the local safety net has done its job.
@@ -510,8 +546,10 @@ export default function DashboardPage() {
 
   const toggleEditMode = () => {
     if (isEditMode) {
-      // Cancel edit - revert to original
       setEditedContent(blogResult?.content || '');
+    } else {
+      // The editor works on placeholders, not raw markers.
+      setEditedContent(toEditableContent(blogResult?.content || ''));
     }
     setIsEditMode(!isEditMode);
   };
@@ -930,6 +968,12 @@ export default function DashboardPage() {
                         : '이 화면을 벗어나도 글은 저장됩니다.'}
                     </p>
                   </div>
+                  <button
+                    onClick={cancelBlogGeneration}
+                    className={`${btnSecondary} shrink-0 px-4 py-2 text-sm`}
+                  >
+                    중단
+                  </button>
                 </div>
               </div>
             )}
@@ -1003,9 +1047,35 @@ export default function DashboardPage() {
               </button>
             </div>
 
+            {/* On a phone the two panes stacked meant scrolling the whole
+                article to reach the images — the common case being a quick
+                check between appointments. Below lg they become tabs; from lg
+                up both are visible and the switcher is hidden. */}
+            {imagePrompts.length > 0 && (
+              <div className="lg:hidden flex gap-1 p-1 bg-accent-tint rounded-lg" role="tablist">
+                {([
+                  ['article', '본문'],
+                  ['images', `이미지 (${generatedImages.filter(Boolean).length}/${imagePrompts.length})`],
+                ] as const).map(([pane, label]) => (
+                  <button
+                    key={pane}
+                    role="tab"
+                    aria-selected={mobilePane === pane}
+                    onClick={() => setMobilePane(pane)}
+                    className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                      mobilePane === pane
+                        ? 'bg-surface text-ink shadow-sm'
+                        : 'text-ink-soft hover:text-ink'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Article left, images right, each scrolling on its own so the
-                two can be read against each other. Below lg they stack and
-                the page scrolls as one. */}
+                two can be read against each other. */}
             <div
               className={`space-y-6 lg:space-y-0 lg:grid lg:gap-14 lg:flex-1 lg:min-h-0 ${
                 imagePrompts.length > 0
@@ -1013,15 +1083,25 @@ export default function DashboardPage() {
                   : 'lg:grid-cols-1'
               }`}
             >
-              <div className="lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+              <div
+                className={`lg:min-h-0 lg:overflow-y-auto lg:pr-1 lg:block ${
+                  imagePrompts.length > 0 && mobilePane !== 'article' ? 'hidden' : ''
+                }`}
+              >
               <div className="bg-surface rounded-card shadow-card p-8">
                 {isEditMode ? (
-                  <textarea
-                    value={editedContent}
-                    onChange={(e) => setEditedContent(e.target.value)}
-                    className="w-full min-h-[600px] p-4 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent font-mono text-sm"
-                    placeholder="글 내용을 편집하세요..."
-                  />
+                  <>
+                    <textarea
+                      value={editedContent}
+                      onChange={(e) => setEditedContent(e.target.value)}
+                      className="w-full min-h-[600px] p-4 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent font-mono text-sm"
+                      placeholder="글 내용을 편집하세요..."
+                    />
+                    <p className="mt-2 text-xs text-ink-faint">
+                      ⟦이미지 1⟧ 표시는 그 자리에 이미지가 들어간다는 뜻입니다.
+                      옮기면 위치가 바뀌고, 지우면 그 이미지는 본문에 들어가지 않습니다.
+                    </p>
+                  </>
                 ) : (
                   // Serif at a constrained measure: this is the one place the
                   // tenant reads the article as a reader would, so awkward
@@ -1036,7 +1116,11 @@ export default function DashboardPage() {
               </div>
               </div>
 
-              <div className="lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+              <div
+                className={`lg:min-h-0 lg:overflow-y-auto lg:pr-1 lg:block ${
+                  mobilePane !== 'images' ? 'hidden' : ''
+                }`}
+              >
               {/* Image Prompts Section */}
               {imagePrompts.length > 0 && (
                 <div className="bg-accent-tint border border-line rounded-card p-6">

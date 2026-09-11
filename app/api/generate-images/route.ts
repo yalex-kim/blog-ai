@@ -122,6 +122,49 @@ async function loadTenantImageContext(tenantId: string): Promise<TenantImageCont
   };
 }
 
+/**
+ * Removes the images a replacement has superseded — every row in this slot
+ * except the one just written.
+ *
+ * Called after the new image is stored, never before. Ordering is the whole
+ * point: a tenant pays for each generation, so an image is only discarded once
+ * something has actually replaced it.
+ */
+async function retireSupersededImages(
+  blogPostId: string,
+  displayOrder: number,
+  keepStoragePath: string
+): Promise<void> {
+  const { data: existing, error } = await supabaseAdmin
+    .from('blog_images')
+    .select('id, storage_path')
+    .eq('blog_post_id', blogPostId)
+    .eq('display_order', displayOrder);
+
+  if (error) {
+    console.error('[generate-images] could not list superseded images', error);
+    return;
+  }
+
+  const superseded = (existing ?? []).filter((image) => image.storage_path !== keepStoragePath);
+  if (superseded.length === 0) return;
+
+  const { error: storageError } = await supabaseAdmin.storage
+    .from('blog-images')
+    .remove(superseded.map((image) => image.storage_path));
+  if (storageError) {
+    console.error('[generate-images] could not remove superseded files', storageError);
+  }
+
+  const { error: rowError } = await supabaseAdmin
+    .from('blog_images')
+    .delete()
+    .in('id', superseded.map((image) => image.id));
+  if (rowError) {
+    console.error('[generate-images] could not remove superseded rows', rowError);
+  }
+}
+
 // Confirms the caller's session actually owns the blog post before allowing
 // writes/deletes against its images (prevents cross-tenant tampering).
 async function verifyBlogPostOwnership(blogPostId: string, tenantId: string): Promise<boolean> {
@@ -199,45 +242,13 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: '이미지 타입이 올바르지 않습니다.' }, { status: 400 });
       }
 
-      // If replaceExisting is true, delete old image first
-      if (replaceExisting && blogPostId && index !== undefined) {
-        try {
-          // Find and delete existing image with same blog_post_id and display_order
-          const { data: existingImages, error: fetchError } = await supabaseAdmin
-            .from('blog_images')
-            .select('id, storage_path')
-            .eq('blog_post_id', blogPostId)
-            .eq('display_order', index);
-
-          if (fetchError) {
-            console.error('Error fetching existing images:', fetchError);
-          } else if (existingImages && existingImages.length > 0) {
-            for (const img of existingImages) {
-              // Delete from storage
-              const { error: storageError } = await supabaseAdmin.storage
-                .from('blog-images')
-                .remove([img.storage_path]);
-
-              if (storageError) {
-                console.error('Error deleting from storage:', storageError);
-              }
-
-              // Delete from database
-              const { error: dbError } = await supabaseAdmin
-                .from('blog_images')
-                .delete()
-                .eq('id', img.id);
-
-              if (dbError) {
-                console.error('Error deleting from database:', dbError);
-              }
-            }
-          }
-        } catch (deleteError) {
-          console.error('Error during image deletion:', deleteError);
-          // Continue with generation even if deletion fails
-        }
-      }
+      // The previous image is NOT removed here. It used to be — deleted
+      // before generation started — so a provider error or a timeout left the
+      // slot with neither the old image nor a new one, throwing away something
+      // already paid for to make room for something that never arrived.
+      //
+      // It is removed further down, after the replacement is safely uploaded
+      // and its metadata written.
 
       // The caller sends the type alongside the description; parseImageType is
       // only the fallback for the legacy "TYPE|description" encoding. Without
@@ -292,6 +303,12 @@ export async function POST(request: NextRequest) {
             type, // Pass image type
             promptId // Pass prompt ID
           );
+
+          // Only now is the old image redundant. Anything that fails above
+          // leaves it in place, which is the point.
+          if (replaceExisting) {
+            await retireSupersededImages(blogPostId, index, storagePath);
+          }
 
           return NextResponse.json({
             image: {
