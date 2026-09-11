@@ -95,9 +95,16 @@ describe('image pricing', () => {
     expect(imageRateUsd('openai')).toBeCloseTo(0.00588, 10);
   });
 
-  it('leaves Gemini unpriced until a rate is supplied', () => {
-    expect(imageRateUsd('gemini')).toBeNull();
-    expect(calculateImageCost('gemini', 7)).toBeNull();
+  it('prices Gemini flat, the same at every tier', () => {
+    // Nano Banana Pro has no quality tiers in this app.
+    expect(imageRateUsd('gemini')).toBeCloseTo(0.09, 10);
+    expect(imageRateUsd('gemini', 'high')).toBeCloseTo(0.09, 10);
+    expect(calculateImageCost('gemini', 5)).toBeCloseTo(0.45, 10);
+  });
+
+  it('leaves an unknown provider unpriced rather than free', () => {
+    expect(imageRateUsd('midjourney')).toBeNull();
+    expect(calculateImageCost('midjourney', 7)).toBeNull();
   });
 
   it('lets an env var override the built-in rate', () => {
@@ -111,15 +118,11 @@ describe('image pricing', () => {
     expect(calculateImageCost('openai', 5, 'high')).toBeCloseTo(1.0536, 10);
   });
 
-  it('ignores a non-numeric or negative rate', () => {
+  it('falls back to the built-in rate when the env override is unusable', () => {
     process.env.GEMINI_IMAGE_USD_PER_IMAGE = 'free';
-    expect(imageRateUsd('gemini')).toBeNull();
+    expect(imageRateUsd('gemini')).toBeCloseTo(0.09, 10);
     process.env.GEMINI_IMAGE_USD_PER_IMAGE = '-1';
-    expect(imageRateUsd('gemini')).toBeNull();
-  });
-
-  it('is null for an unknown provider', () => {
-    expect(imageRateUsd('midjourney')).toBeNull();
+    expect(imageRateUsd('gemini')).toBeCloseTo(0.09, 10);
   });
 
   it('prices each quality tier separately — a High image is not a Low image', () => {
@@ -137,7 +140,7 @@ describe('image pricing', () => {
     expect(imageRateUsd('openai', 'low')).toBeCloseTo(0.02, 10);
   });
 
-  it('supplies a Gemini rate from the env var', () => {
+  it('lets an env var override the Gemini rate', () => {
     process.env.GEMINI_IMAGE_USD_PER_IMAGE = '0.05';
     expect(imageRateUsd('gemini', 'high')).toBeCloseTo(0.05, 10);
   });

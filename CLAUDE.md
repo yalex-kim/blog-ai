@@ -128,9 +128,9 @@ ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GEMINI_API_KEY=
 
-# Optional. Per-image cost overrides for the usage dashboard. gpt-image-2 has
-# built-in rates (1024x1024); Gemini has none, so its images stay unpriced until
-# you set one. A _LOW/_MEDIUM/_HIGH suffix beats the un-suffixed flat value.
+# Optional. Per-image cost overrides for the usage dashboard — both providers
+# have built-in rates, so these are only needed when a published price changes.
+# A _LOW/_MEDIUM/_HIGH suffix beats the un-suffixed flat value.
 OPENAI_IMAGE_USD_PER_IMAGE_LOW=
 OPENAI_IMAGE_USD_PER_IMAGE_MEDIUM=
 OPENAI_IMAGE_USD_PER_IMAGE_HIGH=
@@ -169,9 +169,11 @@ tenant's key or the platform key paid.
 
 `lib/pricing.ts` holds every rate in one table. Anthropic token and web-search
 rates are from the published pricing page; gpt-image-2's are per quality tier at
-1024x1024, the size `lib/image-providers` hard-codes — **change that size and
-the image rates stop being right.** Gemini has no built-in rate. Env vars
-override, per tier or flat.
+1024x1024 and Gemini's is flat per image at 1:1/1K — the sizes
+`lib/image-providers` hard-codes, so **change a size and the image rates stop
+being right.** Env vars override, per tier or flat. Every rate carries its
+source in a comment; neither image provider's page was reachable from the build
+environment, so those numbers were supplied by the operator.
 
 Image quality is the priced unit on OpenAI, not the image count: High is ~36x
 Low. `usage_events.image_quality` records which tier ran, and the dashboard

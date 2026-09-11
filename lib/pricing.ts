@@ -51,26 +51,30 @@ export function normalizeImageQuality(value: unknown): ImageQuality | null {
 // ARE FOR 1024x1024, which is what lib/image-providers hard-codes for every
 // slot — change that size and these numbers stop being right.
 //
-// gpt-image-2 source: developers.openai.com/api/docs/pricing (2026-09-11).
-// Gemini has no built-in rate: its pricing page was not reachable when this was
-// written, and a made-up number in a billing view is worse than an honest
-// blank, so Gemini images stay unpriced until an env var supplies a rate.
+// Neither provider's own pricing page is reachable from this environment, so
+// both sets of numbers were supplied by the operator and are recorded here as
+// given rather than independently verified — hence the per-source notes.
 //
 // Override or supply rates with, in precedence order:
-//   OPENAI_IMAGE_USD_PER_IMAGE_LOW / _MEDIUM / _HIGH   (per tier)
-//   OPENAI_IMAGE_USD_PER_IMAGE                          (flat, all tiers)
+//   <PREFIX>_LOW / _MEDIUM / _HIGH   (per tier)
+//   <PREFIX>                          (flat, all tiers)
 //   the built-in table below
-// and the same shape for GEMINI_IMAGE_USD_PER_IMAGE[_TIER].
+// where PREFIX is OPENAI_IMAGE_USD_PER_IMAGE or GEMINI_IMAGE_USD_PER_IMAGE.
 const IMAGE_RATE_ENV_PREFIX: Record<string, string> = {
   openai: 'OPENAI_IMAGE_USD_PER_IMAGE',
   gemini: 'GEMINI_IMAGE_USD_PER_IMAGE',
 };
 
-const IMAGE_RATES: Record<string, Record<ImageQuality, number> | null> = {
-  // gpt-image-2, 1024x1024
+// A per-tier map where the provider charges by tier, a plain number where it
+// does not, null where the rate is unknown.
+const IMAGE_RATES: Record<string, Record<ImageQuality, number> | number | null> = {
+  // gpt-image-2 at 1024x1024. Source: developers.openai.com/api/docs/pricing.
   openai: { low: 0.00588, medium: 0.05268, high: 0.21072 },
-  // gemini-3-pro-image-preview — rate unknown, see above
-  gemini: null,
+
+  // gemini-3-pro-image-preview ("Nano Banana Pro"), flat per image — the
+  // dashboard offers no quality tier for Gemini and the provider requests a
+  // fixed 1:1 / 1K image. Source: nanobananaapi.ai.
+  gemini: 0.09,
 };
 
 function readRate(name: string): number | null {
@@ -93,7 +97,8 @@ export function imageRateUsd(provider: string, quality?: ImageQuality | null): n
   if (flat !== null) return flat;
 
   const table = IMAGE_RATES[provider];
-  if (!table) return null;
+  if (table === null || table === undefined) return null;
+  if (typeof table === 'number') return table;
 
   return table[quality ?? DEFAULT_IMAGE_QUALITY];
 }
