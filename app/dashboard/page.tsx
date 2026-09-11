@@ -129,6 +129,11 @@ export default function DashboardPage() {
   // provider call is still billed once it has started — the saving is the
   // minutes, not the money, and the UI says so.
   const blogAbortRef = useRef<AbortController | null>(null);
+  // Guards against double-submission. These are refs, not state, on purpose:
+  // state updates are asynchronous, so a second click can be handled before
+  // the re-render that would have disabled the control. A ref flips now.
+  const generatingBlogRef = useRef(false);
+  const inFlightImageIndices = useRef<Set<number>>(new Set());
   // Mobile splits the result into two panes; the desktop layout shows both.
   const [mobilePane, setMobilePane] = useState<'article' | 'images'>('article');
 
@@ -395,6 +400,13 @@ export default function DashboardPage() {
   };
 
   const generateBlog = async (topic: string) => {
+    // Every caller funnels through here, so one guard covers the recommendation
+    // buttons, the custom-topic button and the Enter key. Each extra call was a
+    // separate article saved and a separate charge on the tenant's own key, with
+    // the responses overwriting each other as they landed.
+    if (generatingBlogRef.current) return;
+    generatingBlogRef.current = true;
+
     setGeneratingBlog(true);
     // The topic that starts a generation is usually a recommendation halfway
     // down the page, and the progress card is at the top. Without this the
@@ -458,6 +470,7 @@ export default function DashboardPage() {
         showToast('error', '블로그 생성 중 오류가 발생했습니다.');
       }
     } finally {
+      generatingBlogRef.current = false;
       blogAbortRef.current = null;
       setGeneratingBlog(false);
     }
@@ -569,6 +582,9 @@ export default function DashboardPage() {
   const generateSingleImage = async (index: number): Promise<boolean> => {
     const prompt = imagePrompts[index];
     if (!prompt) return false;
+    // Same reasoning as the article guard, per slot.
+    if (inFlightImageIndices.current.has(index)) return false;
+    inFlightImageIndices.current.add(index);
 
     setRegeneratingIndices((prev) => new Set(prev).add(index));
 
@@ -616,6 +632,7 @@ export default function DashboardPage() {
       showToast('error', `${index + 1}번 이미지 생성 중 오류가 발생했습니다.`);
       return false;
     } finally {
+      inFlightImageIndices.current.delete(index);
       setRegeneratingIndices((prev) => {
         const next = new Set(prev);
         next.delete(index);
@@ -636,6 +653,9 @@ export default function DashboardPage() {
       showToast('error', '이미지 프롬프트가 없습니다.');
       return;
     }
+    // The per-slot guards below already stop duplicates reaching the API, but
+    // returning early keeps the progress counter honest.
+    if (inFlightImageIndices.current.size > 0) return;
 
     setGeneratingImages(true);
     setImageProgress({ done: 0, total: imagePrompts.length });
@@ -816,7 +836,7 @@ export default function DashboardPage() {
                 <h3 className="text-lg font-semibold">AI 주제 추천</h3>
                 <button
                   onClick={fetchTopicRecommendations}
-                  disabled={loadingTopics}
+                  disabled={loadingTopics || generatingBlog}
                   className={`${btnPrimary} px-4 py-2`}
                 >
                   {loadingTopics ? '추천 중...' : '주제 추천 받기'}
@@ -835,10 +855,11 @@ export default function DashboardPage() {
                           <button
                             key={idx}
                             onClick={() => generateBlog(topic)}
-                            className={`w-full text-left px-4 py-3 rounded-xl transition-colors text-ink ${
+                            disabled={generatingBlog}
+                            className={`w-full text-left px-4 py-3 rounded-xl transition-colors text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
                               categoryIndex % 2 === 0
-                                ? 'bg-paper hover:bg-accent-tint border border-line'
-                                : 'bg-accent-tint hover:bg-line'
+                                ? 'bg-paper hover:bg-accent-tint border border-line disabled:hover:bg-paper'
+                                : 'bg-accent-tint hover:bg-line disabled:hover:bg-accent-tint'
                             }`}
                           >
                             {topic}
@@ -863,8 +884,11 @@ export default function DashboardPage() {
                   value={customTopic}
                   onChange={(e) => setCustomTopic(e.target.value)}
                   placeholder="원하는 주제를 입력하세요"
-                  className="flex-1 px-4 py-3 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent"
-                  onKeyDown={(e) => e.key === 'Enter' && customTopic && generateBlog(customTopic)}
+                  disabled={generatingBlog}
+                  className="flex-1 px-4 py-3 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent disabled:opacity-50"
+                  onKeyDown={(e) =>
+                    e.key === 'Enter' && customTopic && !generatingBlog && generateBlog(customTopic)
+                  }
                 />
                 <button
                   onClick={() => customTopic && generateBlog(customTopic)}
