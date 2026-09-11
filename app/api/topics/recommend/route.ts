@@ -6,10 +6,10 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
 import { getVertical } from '@/lib/verticals/registry';
 import { buildTopicPrompt } from '@/lib/verticals/build-blog-prompt';
+import { resolveApiKey, missingKeyMessage, MISSING_API_KEY_CODE } from '@/lib/tenant-keys';
+import { recordUsage, extractAnthropicUsage } from '@/lib/usage';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const TOPIC_MODEL = 'claude-sonnet-5';
 
 export async function POST(request: NextRequest) {
   try {
@@ -45,6 +45,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '계정 정보를 찾을 수 없습니다.' }, { status: 404 });
     }
 
+    // BYOK — the select above is `*`, so the encrypted key column is already here.
+    const anthropicKey = resolveApiKey('anthropic', tenant);
+    if (!anthropicKey) {
+      return NextResponse.json(
+        { error: missingKeyMessage('anthropic'), code: MISSING_API_KEY_CODE, provider: 'anthropic' },
+        { status: 400 }
+      );
+    }
+
+    const anthropic = new Anthropic({ apiKey: anthropicKey.apiKey });
+
     // Get recent blog posts
     const { data: recentPosts } = await supabaseAdmin
       .from('blog_posts')
@@ -69,7 +80,7 @@ export async function POST(request: NextRequest) {
     );
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-5',
+      model: TOPIC_MODEL,
       max_tokens: 2000,
       // Simple structured list generation — no reasoning depth needed, and
       // thinking (on by default for this model) was pushing content past
@@ -103,6 +114,15 @@ export async function POST(request: NextRequest) {
       );
       const match = content.match(pattern);
       topics[key] = match ? parseTopics(match[1]) : [];
+    });
+
+    await recordUsage({
+      tenantId: sessionData.id,
+      kind: 'topic_recommendation',
+      provider: 'anthropic',
+      model: TOPIC_MODEL,
+      keySource: anthropicKey.source,
+      tokens: extractAnthropicUsage(message.usage),
     });
 
     return NextResponse.json({ topics });

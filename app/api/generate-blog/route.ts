@@ -14,10 +14,15 @@ import {
   buildBlogUserMessage,
 } from '@/lib/verticals/build-blog-prompt';
 import { isTrustedOrigin } from '@/lib/request-security';
+import {
+  resolveApiKey,
+  missingKeyMessage,
+  KEY_COLUMNS,
+  MISSING_API_KEY_CODE,
+} from '@/lib/tenant-keys';
+import { recordUsage, extractAnthropicUsage } from '@/lib/usage';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const BLOG_MODEL = 'claude-sonnet-4-5-20250929';
 
 const MAX_TOPIC_LENGTH = 200;
 const MAX_KEYWORDS_LENGTH = 500;
@@ -72,12 +77,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch tenant information
+    // Fetch tenant information, including the tenant's own API key.
     const { data: tenant } = await supabaseAdmin
       .from('tenants')
-      .select('name, category, address, main_services, vertical, trusted_domains')
+      .select(
+        `name, category, address, main_services, vertical, trusted_domains, ${KEY_COLUMNS.anthropic}`
+      )
       .eq('id', sessionData.id)
       .single();
+
+    // BYOK: the tenant's own key pays for this call, and there is no fallback.
+    const key = resolveApiKey('anthropic', tenant);
+    if (!key) {
+      return NextResponse.json(
+        { error: missingKeyMessage('anthropic'), code: MISSING_API_KEY_CODE, provider: 'anthropic' },
+        { status: 400 }
+      );
+    }
+
+    const anthropic = new Anthropic({ apiKey: key.apiKey });
 
     // The pack decides how this post is written; an unknown or missing
     // vertical falls back to the generic pack rather than failing the request.
@@ -98,7 +116,7 @@ export async function POST(request: NextRequest) {
       : pack.trustedDomains;
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
+      model: BLOG_MODEL,
       max_tokens: 10164,
       temperature: 1,
       system: buildBlogSystemPrompt(pack),
@@ -190,6 +208,18 @@ export async function POST(request: NextRequest) {
     if (data && !error) {
       blogPostId = data.id;
     }
+
+    // Metering. Recorded after the post is saved so the row can point at it,
+    // and awaited so a serverless instance is not frozen mid-insert.
+    await recordUsage({
+      tenantId: sessionData.id,
+      kind: 'blog_generation',
+      provider: 'anthropic',
+      model: BLOG_MODEL,
+      keySource: key.source,
+      blogPostId,
+      tokens: extractAnthropicUsage(message.usage),
+    });
 
     return NextResponse.json({
       content,

@@ -22,10 +22,51 @@ need to keep working, give blog-ai its own Supabase project.
 
 Take a backup first. The script is safe to re-run.
 
+## "Login stopped working" checklist
+
+Two unrelated causes present identically, because both make the credential
+query fail and the login route can only say so as a 500:
+
+1. **The Supabase project paused itself.** Free-plan projects pause after about
+   a week with no activity, and a paused project simply stops answering — no
+   error page, no warning email you will notice in time. Resume it from the
+   Supabase dashboard. This is the common one, and nothing in the app can fix
+   it from this side.
+2. **The schema is behind the code.** See the next section.
+
+`GET /api/health` tells you which: `databaseReachable: false` is the paused
+project, a populated `problems` array naming columns is the schema.
+
+## An existing database that is behind the code
+
+Run `001_repair_schema.sql`. It `ALTER`s every table into the current shape and
+is safe to re-run.
+
+You need it because `schema.sql` is written with `CREATE TABLE IF NOT EXISTS`.
+That is right for a fresh project and does nothing for an existing one: once a
+table exists the whole `CREATE` is skipped, so a column added to `schema.sql`
+after you first ran it never reaches your database. **Re-running `schema.sql`
+does not repair drift.**
+
+The drift is not cosmetic. The admin login route filters on `admins.is_active`
+before it checks anything else, so against a table missing that column
+PostgREST fails the query, the route reads that as "no such admin", and a
+correct password comes back as `401` — identical to a wrong one.
+
+`GET /api/health` reports exactly which columns are missing, without needing a
+login. Set `HEALTH_CHECK_TOKEN` to require `?token=…` on it.
+
 ## Migrations
 
-There is no numbered migration chain yet. When the first schema change lands,
-add `001_*.sql` here and keep `schema.sql` as the current full picture.
+Run in order, after `schema.sql`:
+
+| File | What it does |
+|---|---|
+| `001_repair_schema.sql` | Brings an existing database up to the schema the code expects. Fixes the missing-`admins.is_active` 401. |
+| `002_byok_and_usage.sql` | Per-tenant encrypted API key columns, and the `usage_events` table behind the usage dashboard. |
+| `003_backfill_image_costs.sql` | **Optional.** Fills in `cost_usd` on image rows recorded before image rates existed. The dashboard already re-costs those rows on read, so this only matters if you read `cost_usd` directly. |
+
+Keep `schema.sql` as the current full picture and add `003_*.sql` beside these.
 
 ## First admin account
 

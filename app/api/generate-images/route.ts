@@ -9,10 +9,25 @@ import {
 import { getVertical } from '@/lib/verticals/registry';
 import { IMAGE_TYPES, resolveImageType, type ImageType, type VerticalPack } from '@/lib/verticals/types';
 import { supabaseAdmin } from '@/lib/supabase';
-import { getImageProvider } from '@/lib/image-providers';
+import { getImageProvider, resolveImageProviderId } from '@/lib/image-providers';
 import { getSession } from '@/lib/session';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
+import {
+  resolveApiKey,
+  missingKeyMessage,
+  KEY_COLUMNS,
+  MISSING_API_KEY_CODE,
+} from '@/lib/tenant-keys';
+import { recordUsage } from '@/lib/usage';
+import { normalizeImageQuality, DEFAULT_IMAGE_QUALITY } from '@/lib/pricing';
+
+// The model each provider actually generates with — recorded on usage rows so
+// the dashboard can name what was billed.
+const IMAGE_MODELS: Record<string, string> = {
+  openai: 'gpt-image-2',
+  gemini: 'gemini-3-pro-image-preview',
+};
 
 export const maxDuration = 300; // 5 minutes for High quality generation
 
@@ -44,14 +59,23 @@ function isValidKeywordItem(keyword: unknown): boolean {
 }
 
 // Every image needs the tenant's vertical pack (it supplies the visual style
-// and the domain framing), and THUMBNAIL cards additionally print the real
-// tenant name and neighbourhood on the card. One round trip covers both.
-async function loadTenantImageContext(
-  tenantId: string
-): Promise<{ pack: VerticalPack; branding: ThumbnailBranding }> {
+// and the domain framing), THUMBNAIL cards additionally print the real tenant
+// name and neighbourhood, and BYOK needs the tenant's own image provider key.
+// One round trip covers all three, for the whole request rather than per image.
+// Which provider to call is not read here — the dashboard sends it per request.
+interface TenantImageContext {
+  pack: VerticalPack;
+  branding: ThumbnailBranding;
+  tenant: {
+    openai_api_key_encrypted?: string | null;
+    gemini_api_key_encrypted?: string | null;
+  } | null;
+}
+
+async function loadTenantImageContext(tenantId: string): Promise<TenantImageContext> {
   const { data: tenant } = await supabaseAdmin
     .from('tenants')
-    .select('name, address, vertical')
+    .select(`name, address, vertical, ${KEY_COLUMNS.openai}, ${KEY_COLUMNS.gemini}`)
     .eq('id', tenantId)
     .single();
 
@@ -61,6 +85,7 @@ async function loadTenantImageContext(
       tenantName: tenant?.name || undefined,
       location: deriveLocationLabel(tenant?.address) || undefined,
     },
+    tenant,
   };
 }
 
@@ -106,7 +131,25 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const imageProvider = getImageProvider(providerOverride);
+    // Loaded once for the whole request — both the single-image and batch paths
+    // below share the pack, the branding and the tenant's key.
+    const { pack, branding, tenant } = await loadTenantImageContext(sessionData.id);
+
+    const providerId = resolveImageProviderId(providerOverride);
+    const imageKey = resolveApiKey(providerId, tenant);
+    if (!imageKey) {
+      return NextResponse.json(
+        { error: missingKeyMessage(providerId), code: MISSING_API_KEY_CODE, provider: providerId },
+        { status: 400 }
+      );
+    }
+
+    const imageProvider = getImageProvider(providerId, imageKey.apiKey);
+
+    // Falling back to the provider's own default rather than null keeps the
+    // recorded quality equal to what was actually generated, which is what the
+    // per-tier rate is looked up by.
+    const quality = normalizeImageQuality(imageQuality) ?? DEFAULT_IMAGE_QUALITY;
 
     // Single image generation (for regeneration)
     if (description !== undefined && index !== undefined) {
@@ -169,13 +212,25 @@ export async function POST(request: NextRequest) {
         : parseImageType(description);
 
       // Generate typed prompt
-      const { pack, branding } = await loadTenantImageContext(sessionData.id);
       const prompt = generateImagePrompt(pack, type, topic, cleanDescription, text, branding);
 
       const result = await imageProvider.generateImage({
         prompt,
         size: "1024x1024",
-        quality: imageQuality,
+        quality,
+      });
+
+      // Metered on generation, not on upload: the provider bills for the image
+      // whether or not storing it afterwards succeeds.
+      await recordUsage({
+        tenantId: sessionData.id,
+        kind: 'image_generation',
+        provider: providerId,
+        model: IMAGE_MODELS[providerId] ?? providerId,
+        keySource: imageKey.source,
+        blogPostId: blogPostId ?? null,
+        imageCount: 1,
+        imageQuality: quality,
       });
 
       const b64Image = result.imageData;
@@ -246,10 +301,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetched once for the whole batch rather than per image: every card in a
-    // post shares one vertical pack and one tenant name.
-    const { pack, branding: batchBranding } = await loadTenantImageContext(sessionData.id);
-
     // Generate images for each keyword
     const imagePromises = keywords.map(async (keyword: string | {type?: string, description: string, text: string, id?: string}, idx: number) => {
       // Handle both string and object formats
@@ -264,12 +315,12 @@ export async function POST(request: NextRequest) {
         : parseImageType(visualDescription);
 
       // Generate typed prompt
-      const prompt = generateImagePrompt(pack, type, topic, cleanDescription, textContent, batchBranding);
+      const prompt = generateImagePrompt(pack, type, topic, cleanDescription, textContent, branding);
 
       const result = await imageProvider.generateImage({
         prompt,
         size: "1024x1024",
-        quality: imageQuality,
+        quality,
       });
 
       const b64Image = result.imageData;
@@ -315,7 +366,38 @@ export async function POST(request: NextRequest) {
       };
     });
 
-    const images = await Promise.all(imagePromises);
+    const results = await Promise.allSettled(imagePromises);
+
+    // One row for the batch, counting only the images the provider actually
+    // produced — a call that threw was not billed.
+    const generatedCount = results.filter((r) => r.status === 'fulfilled').length;
+    if (generatedCount > 0) {
+      await recordUsage({
+        tenantId: sessionData.id,
+        kind: 'image_generation',
+        provider: providerId,
+        model: IMAGE_MODELS[providerId] ?? providerId,
+        keySource: imageKey.source,
+        blogPostId: blogPostId ?? null,
+        imageCount: generatedCount,
+        imageQuality: quality,
+      });
+    }
+
+    // A single failed image must not lose the ones that worked, so each
+    // rejection becomes an error entry in its own slot.
+    const images = results.map((result, idx) =>
+      result.status === 'fulfilled'
+        ? result.value
+        : {
+            keyword: typeof keywords[idx] === 'string' ? keywords[idx] : keywords[idx]?.description ?? '',
+            text: '',
+            url: '',
+            prompt: '',
+            type: 'EXPLAINER',
+            error: '이미지 생성에 실패했습니다.',
+          }
+    );
 
     return NextResponse.json({ images });
   } catch (error: unknown) {

@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { createAdminSessionToken, SESSION_COOKIE_MAX_AGE_SECONDS } from '@/lib/session';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
+import { isDatabaseFault, logDatabaseFault } from '@/lib/db-errors';
 
 export async function POST(request: NextRequest) {
   try {
@@ -42,7 +43,18 @@ export async function POST(request: NextRequest) {
       .eq('is_active', true)
       .single();
 
-    if (error || !admin) {
+    // A broken query is not a failed login. Reporting a schema mismatch as 401
+    // is what made the `admins.is_active` drift so hard to find: the right
+    // password came back as "wrong ID or password".
+    if (isDatabaseFault(error)) {
+      logDatabaseFault('admin-login', error!);
+      return NextResponse.json(
+        { error: '서버 설정 문제로 로그인할 수 없습니다. 관리자에게 문의해주세요.', code: 'DB_ERROR' },
+        { status: 500 }
+      );
+    }
+
+    if (!admin) {
       return NextResponse.json(
         { error: '잘못된 관리자 ID 또는 비밀번호입니다.' },
         { status: 401 }
@@ -59,11 +71,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Update last login time
-    await supabaseAdmin
+    // Update last login time. Bookkeeping only — if the column is missing or
+    // the write fails, log it but still let the admin in.
+    const { error: touchError } = await supabaseAdmin
       .from('admins')
       .update({ last_login_at: new Date().toISOString() })
       .eq('id', admin.id);
+    if (touchError) logDatabaseFault('admin-login:last_login_at', touchError);
 
     const sessionToken = createAdminSessionToken({
       id: admin.id,

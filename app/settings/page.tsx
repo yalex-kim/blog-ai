@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { isValidDomainEntry } from '@/lib/trusted-domains';
 import { getVertical } from '@/lib/verticals/registry';
 import { btnPrimary, btnSecondary } from '@/lib/ui';
+import ApiKeySettings from '@/components/ApiKeySettings';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -397,6 +398,8 @@ export default function SettingsPage() {
             {saving ? '저장 중...' : '설정 저장'}
           </button>
         </form>
+
+        <ApiKeySettings />
       </main>
     </div>
   );
