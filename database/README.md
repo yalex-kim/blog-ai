@@ -22,6 +22,21 @@ need to keep working, give blog-ai its own Supabase project.
 
 Take a backup first. The script is safe to re-run.
 
+## "Login stopped working" checklist
+
+Two unrelated causes present identically, because both make the credential
+query fail and the login route can only say so as a 500:
+
+1. **The Supabase project paused itself.** Free-plan projects pause after about
+   a week with no activity, and a paused project simply stops answering — no
+   error page, no warning email you will notice in time. Resume it from the
+   Supabase dashboard. This is the common one, and nothing in the app can fix
+   it from this side.
+2. **The schema is behind the code.** See the next section.
+
+`GET /api/health` tells you which: `databaseReachable: false` is the paused
+project, a populated `problems` array naming columns is the schema.
+
 ## An existing database that is behind the code
 
 Run `001_repair_schema.sql`. It `ALTER`s every table into the current shape and

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
+import { isConnectionFailure } from '@/lib/db-errors';
 
 // Deployment diagnostics: answers "why is login failing" without anyone being
 // able to log in first, which is exactly when you need it.
@@ -45,6 +46,26 @@ function createAdminClient(url: string, serviceRoleKey: string) {
 }
 
 type AdminDb = ReturnType<typeof createAdminClient>;
+
+/**
+ * Is the database answering at all? Asked before anything else, because a
+ * paused Supabase project and a missing column both surface as "the query
+ * failed" while needing completely different fixes — resume the project versus
+ * run a migration. A table that genuinely does not exist still counts as
+ * reachable: PostgREST replied, it just replied 42P01.
+ */
+async function checkConnectivity(db: AdminDb): Promise<{ reachable: boolean; detail: string | null }> {
+  try {
+    const { error } = await db.from('tenants').select('id').limit(1);
+    if (error && isConnectionFailure(error)) {
+      return { reachable: false, detail: error.message };
+    }
+    return { reachable: true, detail: null };
+  } catch (error) {
+    // A thrown fetch rejection is the same condition, reported differently.
+    return { reachable: false, detail: error instanceof Error ? error.message : 'unknown error' };
+  }
+}
 
 interface TableReport {
   exists: boolean;
@@ -136,13 +157,39 @@ export async function GET(request: NextRequest) {
     const db = createAdminClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
     try {
+      const connectivity = await checkConnectivity(db);
+      databaseReachable = connectivity.reachable;
+
+      if (!connectivity.reachable) {
+        // Overwhelmingly the free-plan auto-pause, which is silent: the project
+        // simply stops answering, and every login then fails in a way that
+        // looks nothing like "the database is asleep".
+        problems.push(
+          `Supabase에 연결할 수 없습니다 (${connectivity.detail ?? 'no response'}). ` +
+            '무료 플랜 프로젝트는 약 1주일간 사용하지 않으면 자동으로 일시중지됩니다. ' +
+            'Supabase 대시보드에서 프로젝트 상태를 확인하고 Resume 해주세요.'
+        );
+
+        return NextResponse.json(
+          {
+            ok: false,
+            checkedAt: new Date().toISOString(),
+            env,
+            supabaseProjectRef,
+            databaseReachable: false,
+            tables: null,
+            problems,
+          },
+          { status: 503 }
+        );
+      }
+
       const entries = await Promise.all(
         Object.entries(REQUIRED_COLUMNS).map(
           async ([table, columns]) => [table, await inspectTable(db, table, columns)] as const
         )
       );
       tables = Object.fromEntries(entries);
-      databaseReachable = true;
 
       for (const [table, report] of entries) {
         if (!report.exists) {

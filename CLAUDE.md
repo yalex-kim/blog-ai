@@ -176,6 +176,13 @@ schema file refuses to run against a medblog-ai database;
 `database/migrate-from-medblog.sql` converts one in place instead. See
 `database/README.md`.
 
+A login that fails for every account is usually one of two things, and they
+look identical from the browser: the Supabase project has **paused itself**
+(free plan, ~1 week idle — resume it in the dashboard), or the schema is behind
+the code. `GET /api/health` separates them — `databaseReachable: false` is the
+former. Neither is a credential problem, and the login routes now answer both
+with a 500 rather than the 401 that hid them.
+
 **`schema.sql` cannot update an existing database.** Every table is
 `CREATE TABLE IF NOT EXISTS`, so against a database that already has the table
 the whole statement is skipped and any column added later never lands.

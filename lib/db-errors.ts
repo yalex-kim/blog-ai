@@ -21,6 +21,21 @@ export function isDatabaseFault(error: PostgrestError | null | undefined): boole
   return !!error && !isNoRowsError(error);
 }
 
+// A Supabase project on the free plan pauses itself after about a week with no
+// activity, and a paused project answers nothing at all. supabase-js surfaces
+// that as an error with no PostgREST code — the request never reached
+// PostgREST — so it is worth separating from a schema fault: one is fixed by
+// resuming the project in the dashboard, the other by running a migration.
+const CONNECTION_FAILURE_PATTERN =
+  /fetch failed|failed to fetch|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|network|socket hang up|timeout/i;
+
+export function isConnectionFailure(error: PostgrestError | null | undefined): boolean {
+  if (!error) return false;
+  // PostgREST always sets a code; its absence means we never got a reply from it.
+  if (!error.code) return true;
+  return CONNECTION_FAILURE_PATTERN.test(error.message ?? '');
+}
+
 /**
  * Logs a PostgREST fault with enough detail to identify a schema mismatch from
  * the platform's logs. `message`/`details`/`hint` are PostgREST's own strings
@@ -28,6 +43,10 @@ export function isDatabaseFault(error: PostgrestError | null | undefined): boole
  */
 export function logDatabaseFault(context: string, error: PostgrestError): void {
   console.error(`[${context}] database query failed`, {
+    // 'connection' points at a paused or unreachable project, 'query' at the
+    // statement or the schema. Named in the log so the platform's log search
+    // separates the two without anyone having to recognise the message.
+    kind: isConnectionFailure(error) ? 'connection' : 'query',
     code: error.code,
     message: error.message,
     details: error.details,
