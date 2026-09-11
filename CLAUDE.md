@@ -189,9 +189,16 @@ breaks the per-model table down by it — a batch costed at a single flat rate
 would be wrong by more than an order of magnitude.
 
 **An unknown rate produces `cost_usd = NULL`, never 0** — the dashboard reports
-those as unpriced rather than understating the bill. Token and request counts
-are the provider's own numbers and stay correct even when a rate is wrong, so
-usage can be re-costed later.
+those as unpriced rather than understating the bill.
+
+`cost_usd` is computed when the row is written, so on its own a row written
+while a rate was missing would stay NULL forever and adding the rate later
+would do nothing for it. `/api/usage` therefore re-costs any NULL row from the
+counts it stored, using today's table — the counts are the provider's own
+numbers and never went missing, which is the whole point of storing them
+separately from the money. A stored cost still wins where it exists: it was
+computed with the rate in effect then, and restating past spend at today's
+prices would be its own kind of wrong.
 
 ### Database setup
 

@@ -221,9 +221,11 @@ export default function UsagePage() {
 
             {data.summary.unpricedEvents > 0 && (
               <div className="mb-6 bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded text-sm">
-                {numberFormat.format(data.summary.unpricedEvents)}건은 단가 정보가 없어
-                금액에 포함되지 않았습니다. 알 수 없는 모델로 생성된 기록입니다 —
-                해당 모델의 단가를 <code>lib/pricing.ts</code>에 추가하면 다시 집계됩니다.
+                {numberFormat.format(data.summary.unpricedEvents)}건은 단가를 알 수 없어
+                금액에 포함되지 않았습니다. 단가 표에 없는 모델·제공자로 생성된
+                기록입니다 — <code>lib/pricing.ts</code>에 단가를 추가하면 지난
+                기록까지 자동으로 다시 집계됩니다. 사용량(토큰·건수)은 그대로 남아
+                있습니다.
               </div>
             )}
 

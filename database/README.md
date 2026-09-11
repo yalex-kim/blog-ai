@@ -64,6 +64,7 @@ Run in order, after `schema.sql`:
 |---|---|
 | `001_repair_schema.sql` | Brings an existing database up to the schema the code expects. Fixes the missing-`admins.is_active` 401. |
 | `002_byok_and_usage.sql` | Per-tenant encrypted API key columns, and the `usage_events` table behind the usage dashboard. |
+| `003_backfill_image_costs.sql` | **Optional.** Fills in `cost_usd` on image rows recorded before image rates existed. The dashboard already re-costs those rows on read, so this only matters if you read `cost_usd` directly. |
 
 Keep `schema.sql` as the current full picture and add `003_*.sql` beside these.
 
