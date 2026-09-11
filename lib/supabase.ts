@@ -33,6 +33,12 @@ export interface Tenant {
   blog_id: string | null;
   blog_password_encrypted: string | null;
   blog_board_name: string | null;
+  // BYOK — encrypted with BLOG_CREDENTIAL_ENCRYPTION_KEY, never sent to a client.
+  anthropic_api_key_encrypted: string | null;
+  openai_api_key_encrypted: string | null;
+  gemini_api_key_encrypted: string | null;
+  /** 'openai' | 'gemini', or null to follow the IMAGE_PROVIDER env default. */
+  image_provider: string | null;
   is_initial_setup_complete: boolean;
   must_change_password: boolean;
   created_at: string;

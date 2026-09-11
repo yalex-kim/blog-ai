@@ -418,6 +418,12 @@ export default function DashboardPage() {
           </div>
           <div className="flex gap-3">
             <button
+              onClick={() => router.push('/dashboard/usage')}
+              className={`${btnGhost} px-4 py-2`}
+            >
+              사용량
+            </button>
+            <button
               onClick={() => router.push('/settings')}
               className={`${btnGhost} px-4 py-2`}
             >

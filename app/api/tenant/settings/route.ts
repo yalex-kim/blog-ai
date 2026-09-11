@@ -4,10 +4,42 @@ import { getSession } from '@/lib/session';
 import { encryptBlogPassword } from '@/lib/blog-credential-crypto';
 import { isTrustedOrigin } from '@/lib/request-security';
 import { isValidDomainEntry } from '@/lib/trusted-domains';
+import {
+  KEY_PROVIDERS,
+  KEY_COLUMNS,
+  describeAllKeyStatuses,
+  validateApiKeyFormat,
+  encryptApiKey,
+  PROVIDER_LABELS,
+  type KeyProvider,
+} from '@/lib/tenant-keys';
 
 const MAX_TEXT_FIELD_LENGTH = 200;
 const MAX_SERVICES = 20;
 const MAX_DOMAINS = 20;
+
+// The client is sent the tenant row minus anything that is, or decrypts to, a
+// credential. Listed explicitly rather than filtered by name pattern so that
+// adding a secret column and forgetting to mask it fails loudly in review
+// rather than quietly shipping it to the browser.
+const SECRET_COLUMNS = [
+  'password_hash',
+  'blog_password_encrypted',
+  'anthropic_api_key_encrypted',
+  'openai_api_key_encrypted',
+  'gemini_api_key_encrypted',
+] as const;
+
+function stripSecrets(tenant: Record<string, unknown>): Record<string, unknown> {
+  const safe = { ...tenant };
+  for (const column of SECRET_COLUMNS) delete safe[column];
+  return safe;
+}
+
+/** The plaintext field a client sends for each provider, e.g. `anthropic_api_key`. */
+function keyInputField(provider: KeyProvider): string {
+  return `${provider}_api_key`;
+}
 
 // Get tenant settings
 export async function GET(request: NextRequest) {
@@ -33,12 +65,14 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Don't send credential material to the client
-    const { password_hash, blog_password_encrypted, ...tenantData } = tenant;
-    void password_hash;
-    void blog_password_encrypted;
+    // Don't send credential material to the client. API keys are write-only:
+    // once stored, the tenant gets a masked hint and nothing more.
+    const tenantData = stripSecrets(tenant);
 
-    return NextResponse.json({ tenant: tenantData });
+    return NextResponse.json({
+      tenant: tenantData,
+      apiKeys: describeAllKeyStatuses(tenant),
+    });
   } catch (error) {
     console.error('Error in GET /api/tenant/settings:', error);
     return NextResponse.json(
@@ -132,6 +166,50 @@ export async function PUT(request: NextRequest) {
       updateData.blog_password_encrypted = encryptBlogPassword(updateData.blog_password_encrypted);
     }
 
+    // BYOK. The client sends plaintext (`anthropic_api_key`); it is encrypted
+    // here and only ever read back as a masked hint. An empty string is an
+    // explicit "remove my key" — distinct from omitting the field, which leaves
+    // the stored key alone, so re-saving the settings form does not wipe keys
+    // the form never displayed.
+    for (const provider of KEY_PROVIDERS) {
+      const submitted = updates[keyInputField(provider)];
+      if (submitted === undefined) continue;
+
+      if (typeof submitted !== 'string') {
+        return NextResponse.json(
+          { error: `${PROVIDER_LABELS[provider]} API 키 형식이 올바르지 않습니다.` },
+          { status: 400 }
+        );
+      }
+
+      const trimmed = submitted.trim();
+      if (!trimmed) {
+        updateData[KEY_COLUMNS[provider]] = null;
+        continue;
+      }
+
+      const problem = validateApiKeyFormat(trimmed);
+      if (problem) {
+        return NextResponse.json(
+          { error: `${PROVIDER_LABELS[provider]}: ${problem}` },
+          { status: 400 }
+        );
+      }
+
+      updateData[KEY_COLUMNS[provider]] = encryptApiKey(trimmed);
+    }
+
+    if (updates.image_provider !== undefined) {
+      const requested = updates.image_provider;
+      if (requested !== null && requested !== 'openai' && requested !== 'gemini') {
+        return NextResponse.json(
+          { error: '이미지 생성 제공자가 올바르지 않습니다.' },
+          { status: 400 }
+        );
+      }
+      updateData.image_provider = requested;
+    }
+
     // Check if all required fields are filled
     const requiredFields = ['name', 'main_services', 'address', 'blog_id', 'blog_board_name'];
     const { data: currentHospital } = await supabaseAdmin
@@ -166,13 +244,10 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const { password_hash, blog_password_encrypted, ...tenantData } = data;
-    void password_hash;
-    void blog_password_encrypted;
-
     return NextResponse.json({
       message: '설정이 저장되었습니다.',
-      tenant: tenantData,
+      tenant: stripSecrets(data),
+      apiKeys: describeAllKeyStatuses(data),
     });
   } catch (error) {
     console.error('Error in PUT /api/tenant/settings:', error);

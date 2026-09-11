@@ -13,8 +13,9 @@ npm test         # Run vitest unit tests
 
 Vitest covers `lib/verticals/`, `lib/image-prompts.ts`, `lib/session.ts`,
 `lib/parse-image-suggestions.ts`, `lib/rate-limit.ts`,
-`lib/blog-credential-crypto.ts`, and the reference-verification modules. There
-is no end-to-end/integration coverage for API routes or UI flows.
+`lib/blog-credential-crypto.ts`, `lib/tenant-keys.ts`, `lib/pricing.ts`, and
+the reference-verification modules. There is no end-to-end/integration coverage
+for API routes or UI flows.
 
 ## Architecture
 
@@ -77,12 +78,15 @@ defense-in-depth against CSRF, and login/generation endpoints should call
 ### Key data flows
 
 **Blog generation** (`/api/generate-blog`):
+0. Resolves the tenant's Anthropic key via `resolveApiKey`; the SDK client is
+   built per request, not at module scope
 1. Loads the tenant, resolves its pack via `getVertical`
 2. `buildBlogSystemPrompt(pack)` composes the system prompt; `buildBlogUserMessage` composes the per-request message
 3. Claude runs with `web_search` restricted to the tenant's (or pack's) trusted domains
 4. Claude embeds image suggestions inline: `[#번호 | Type | 묘사 | text : 텍스트]`
 5. `parseImageSuggestions` extracts them; `buildVerifiedReferences` keeps only sources that were actually cited and verified
-6. Saves to `blog_posts`, returns `{ content, imageKeywords, references, imageSuggestions[], blogPostId }`
+6. Saves to `blog_posts`, records a `usage_events` row, returns
+   `{ content, imageKeywords, references, imageSuggestions[], blogPostId }`
 
 **Image generation** (`/api/generate-images`):
 1. Loads the tenant's pack and thumbnail branding in one round trip
@@ -113,21 +117,72 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=   # Supabase's "publishable key" (sb_publishable_
 SUPABASE_SERVICE_ROLE_KEY=       # Supabase's "secret key" (sb_secret_…) — server only
 SESSION_SECRET=                  # signs session cookies (openssl rand -base64 48)
 BLOG_CREDENTIAL_ENCRYPTION_KEY=  # encrypts tenants' blog platform passwords at rest
+IMAGE_PROVIDER=openai            # default when a tenant hasn't picked one
+
+# Model provider keys. Optional under BYOK: they are the *fallback* for tenants
+# who have not entered their own. Leave them unset for strict BYOK.
 ANTHROPIC_API_KEY=
-IMAGE_PROVIDER=openai            # or 'gemini'
 OPENAI_API_KEY=
 GEMINI_API_KEY=
+
+# Optional. Per-image cost for the usage dashboard; unset means images are
+# counted but not priced. Take the numbers from the provider's pricing page.
+OPENAI_IMAGE_USD_PER_IMAGE=
+GEMINI_IMAGE_USD_PER_IMAGE=
+
+# Optional. When set, GET /api/health requires ?token=<value>.
+HEALTH_CHECK_TOKEN=
 ```
 
 `SESSION_SECRET` and `BLOG_CREDENTIAL_ENCRYPTION_KEY` are required — routes
 that need them throw at request time if unset.
 
+### BYOK (bring your own key)
+
+A tenant stores their own Anthropic/OpenAI/Gemini keys, encrypted at rest with
+`BLOG_CREDENTIAL_ENCRYPTION_KEY` (AES-256-GCM, same envelope as the blog
+password — see `lib/secret-crypto.ts`). `resolveApiKey()` in
+`lib/tenant-keys.ts` is the single resolution point: **the tenant's key wins,
+the platform env var is the fallback, and null means the request is refused
+with a message telling them to add one.** That fallback is what makes BYOK a
+migration rather than a breaking change; unset the env vars to enforce BYOK.
+
+Keys are write-only. They are never returned to a client — the settings UI gets
+`{configured, hint: '••••••••1234'}` from `describeKeyStatus()`. In
+`/api/tenant/settings` an omitted key field leaves the stored key alone and an
+empty string deletes it, so saving the profile form never wipes a key it never
+displayed. `stripSecrets()` lists every secret column explicitly; add a column
+there when you add one to the table.
+
+### Usage metering
+
+Every billable call writes a `usage_events` row via `recordUsage()`
+(`lib/usage.ts`), which never throws — losing a metering row beats failing a
+generation the provider already charged for. `key_source` records whether the
+tenant's key or the platform key paid.
+
+`lib/pricing.ts` holds every rate in one table. Anthropic token and web-search
+rates are from the published pricing page; image rates have no default and come
+from the env vars above. **An unknown rate produces `cost_usd = NULL`, never
+0** — the dashboard reports those as unpriced rather than understating the
+bill. Token and request counts are the provider's own numbers and stay correct
+even when a rate is wrong, so usage can be re-costed later.
+
 ### Database setup
 
-Run `database/schema.sql` once in the Supabase SQL Editor, then create the
-public `blog-images` storage bucket. The file refuses to run against a
-medblog-ai database; `database/migrate-from-medblog.sql` converts one in place
-instead. See `database/README.md`.
+Run `database/schema.sql` once in the Supabase SQL Editor, then the numbered
+migrations in order, then create the public `blog-images` storage bucket. The
+schema file refuses to run against a medblog-ai database;
+`database/migrate-from-medblog.sql` converts one in place instead. See
+`database/README.md`.
+
+**`schema.sql` cannot update an existing database.** Every table is
+`CREATE TABLE IF NOT EXISTS`, so against a database that already has the table
+the whole statement is skipped and any column added later never lands.
+Re-running it repairs nothing — that is what `001_repair_schema.sql` is for,
+and it is why a missing `admins.is_active` once made every admin login return
+401. `GET /api/health` reports which columns are actually missing without
+needing a login.
 
 The app uses `supabaseAdmin` (service role key) for all server-side DB
 operations, bypassing RLS. RLS is enabled with no permissive policies as a

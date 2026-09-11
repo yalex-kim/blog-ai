@@ -43,8 +43,14 @@ login. Set `HEALTH_CHECK_TOKEN` to require `?token=…` on it.
 
 ## Migrations
 
-`001_repair_schema.sql` is the first. Keep `schema.sql` as the current full
-picture and add `002_*.sql` and so on beside it.
+Run in order, after `schema.sql`:
+
+| File | What it does |
+|---|---|
+| `001_repair_schema.sql` | Brings an existing database up to the schema the code expects. Fixes the missing-`admins.is_active` 401. |
+| `002_byok_and_usage.sql` | Per-tenant encrypted API key columns, and the `usage_events` table behind the usage dashboard. |
+
+Keep `schema.sql` as the current full picture and add `003_*.sql` beside these.
 
 ## First admin account
 
