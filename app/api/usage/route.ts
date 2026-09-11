@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { getSession } from '@/lib/session';
+import type { PostgrestError } from '@supabase/supabase-js';
 import { isDatabaseFault, logDatabaseFault } from '@/lib/db-errors';
 
 // Spend for the signed-in tenant. Aggregated in this process rather than in
@@ -27,6 +28,42 @@ type UsageRow = {
   cost_usd: string | number | null;
   created_at: string;
 };
+
+/**
+ * Turns a PostgREST failure on `usage_events` into the actual next step.
+ *
+ * The table and its columns arrive together in 002, but they can be missing
+ * independently: a copy of that file taken before `image_quality` was added
+ * creates the table without it, and then the table exists while the select
+ * still fails. Supabase's schema cache adds a third case where everything is
+ * present but PostgREST has not noticed yet.
+ */
+function describeUsageTableFault(error: PostgrestError): string {
+  // 42P01 undefined_table — nothing was created.
+  if (error.code === '42P01') {
+    return 'usage_events 테이블이 없습니다. database/002_byok_and_usage.sql 을 실행해주세요.';
+  }
+
+  // PGRST205 — the table may well exist; PostgREST's schema cache is stale.
+  if (error.code === 'PGRST205') {
+    return (
+      'usage_events 테이블을 찾을 수 없습니다. 방금 마이그레이션을 실행하셨다면 ' +
+      "Supabase SQL Editor에서 NOTIFY pgrst, 'reload schema'; 를 실행하거나 잠시 후 다시 시도해주세요."
+    );
+  }
+
+  // 42703 undefined_column — the table exists but is from an older copy of 002.
+  if (error.code === '42703') {
+    const column = error.message.match(/column\s+\S*?\.?"?([a-z_]+)"?\s+does not exist/i)?.[1];
+    return (
+      `usage_events 테이블에 ${column ? `'${column}' ` : ''}컬럼이 없습니다. ` +
+      'database/002_byok_and_usage.sql 의 최신 버전을 실행해주세요 — ' +
+      '이전 버전으로 만든 테이블에는 이 컬럼이 없습니다.'
+    );
+  }
+
+  return '사용량 데이터를 불러올 수 없습니다.';
+}
 
 // NUMERIC comes back from PostgREST as a string to preserve precision.
 function toNumber(value: string | number | null): number | null {
@@ -61,13 +98,17 @@ export async function GET(request: NextRequest) {
 
     if (isDatabaseFault(error)) {
       logDatabaseFault('usage', error!);
-      // The table arrives with database/002_byok_and_usage.sql. Say so rather
-      // than showing an empty dashboard that looks like "you have spent $0".
+      // Never a bare "did you run the migration?". The three ways this fails
+      // need three different fixes, and a message that cannot tell them apart
+      // sends people to re-run a migration they already ran.
       return NextResponse.json(
         {
-          error:
-            '사용량 데이터를 불러올 수 없습니다. database/002_byok_and_usage.sql 마이그레이션이 적용되었는지 확인해주세요.',
+          error: describeUsageTableFault(error!),
           code: 'DB_ERROR',
+          // PostgREST's own text names the missing object. It is schema
+          // information, not row data, and this route already requires a
+          // session — worth surfacing so the fix does not need a log dive.
+          detail: `${error!.code}: ${error!.message}`,
         },
         { status: 500 }
       );

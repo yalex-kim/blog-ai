@@ -87,6 +87,7 @@ export default function UsagePage() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [errorDetail, setErrorDetail] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -94,6 +95,7 @@ export default function UsagePage() {
     const load = async () => {
       setLoading(true);
       setError('');
+      setErrorDetail('');
       try {
         const response = await fetch(`/api/usage?days=${days}`);
         if (response.status === 401) {
@@ -102,8 +104,12 @@ export default function UsagePage() {
         }
         const body = await response.json();
         if (cancelled) return;
-        if (response.ok) setData(body);
-        else setError(body.error || '사용량을 불러오지 못했습니다.');
+        if (response.ok) {
+          setData(body);
+        } else {
+          setError(body.error || '사용량을 불러오지 못했습니다.');
+          setErrorDetail(body.detail || '');
+        }
       } catch (err) {
         console.error('Error loading usage:', err);
         if (!cancelled) setError('서버 오류가 발생했습니다.');
@@ -158,7 +164,10 @@ export default function UsagePage() {
 
         {error && (
           <div className="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
-            {error}
+            <p>{error}</p>
+            {errorDetail && (
+              <p className="mt-2 text-xs font-mono text-red-600 break-all">{errorDetail}</p>
+            )}
           </div>
         )}
 
