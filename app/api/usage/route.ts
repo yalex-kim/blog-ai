@@ -3,11 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { getSession } from '@/lib/session';
 import type { PostgrestError } from '@supabase/supabase-js';
 import { isDatabaseFault, logDatabaseFault } from '@/lib/db-errors';
-import {
-  calculateTextCost,
-  calculateImageCost,
-  normalizeImageQuality,
-} from '@/lib/pricing';
+import { rowCost, toNumber } from '@/lib/usage-cost';
 
 // Spend for the signed-in tenant. Aggregated in this process rather than in
 // SQL: PostgREST has no GROUP BY, and the alternative is a database function
@@ -68,51 +64,6 @@ function describeUsageTableFault(error: PostgrestError): string {
   }
 
   return '사용량 데이터를 불러올 수 없습니다.';
-}
-
-// NUMERIC comes back from PostgREST as a string to preserve precision.
-function toNumber(value: string | number | null): number | null {
-  if (value === null || value === undefined) return null;
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/**
- * Prices a row from the counts it stored, using today's rate table.
- *
- * cost_usd is computed when the row is written, so a row written while a rate
- * was unknown keeps a NULL cost forever — adding the rate later does nothing
- * for it. The counts, though, are ground truth and never went missing, so a
- * row can be re-costed from them at read time. That is the whole reason the
- * counts are stored separately from the money.
- *
- * The stored value still wins when it exists: it was computed with the rate in
- * effect at the time, and silently restating past spend at today's prices
- * would be a different kind of wrong.
- */
-function recomputeCost(row: UsageRow): number | null {
-  if (row.kind === 'image_generation') {
-    // Rows written before image_quality existed carry null, and are costed at
-    // the provider's default tier — the same tier the generation itself would
-    // have defaulted to.
-    return calculateImageCost(
-      row.provider,
-      row.image_count ?? 0,
-      normalizeImageQuality(row.image_quality)
-    );
-  }
-
-  return calculateTextCost(row.model, {
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    cacheCreationInputTokens: row.cache_creation_input_tokens,
-    cacheReadInputTokens: row.cache_read_input_tokens,
-    webSearchRequests: row.web_search_requests,
-  }).totalUsd;
-}
-
-function rowCost(row: UsageRow): number | null {
-  return toNumber(row.cost_usd) ?? recomputeCost(row);
 }
 
 export async function GET(request: NextRequest) {

@@ -144,9 +144,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
     }
 
+    // One request per image now that the client fans a batch out, so the
+    // budget is counted in images rather than batches: 120/hour is 24 full
+    // five-image posts, well past any real session.
     const { allowed, retryAfterSeconds } = checkRateLimit(
       `generate-images:${sessionData.id}`,
-      30,
+      120,
       60 * 60 * 1000
     );
     if (!allowed) {

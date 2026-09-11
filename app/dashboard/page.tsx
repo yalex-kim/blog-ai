@@ -12,6 +12,7 @@ import { getVertical } from '@/lib/verticals/registry';
 import { IMAGE_TYPES, resolveImageType } from '@/lib/verticals/types';
 import type { KeyStatus } from '@/lib/tenant-keys';
 import { saveDraft, readDraft, clearDraft, describeDraftAge } from '@/lib/drafts';
+import { calculateImageCost, formatUsd } from '@/lib/pricing';
 
 /** Category name → topics. The keys come from the tenant's vertical pack. */
 type Topics = Record<string, string[]>;
@@ -44,6 +45,13 @@ interface EditableImagePrompt {
   text: string;
 }
 
+interface PostCost {
+  totalUsd: number | null;
+  textUsd: number;
+  imageUsd: number;
+  unpricedEvents: number;
+}
+
 interface SavedPost {
   id: string;
   title: string;
@@ -51,6 +59,12 @@ interface SavedPost {
   content: string;
   image_keywords: string[];
   created_at: string;
+  posted_to_blog?: boolean;
+  /** From the list endpoint — counts, not the images themselves. */
+  imageCount?: number;
+  expectedImages?: number;
+  cost?: PostCost;
+  /** Only present on the single-post fetch. */
   images?: GeneratedImage[];
 }
 
@@ -94,6 +108,12 @@ export default function DashboardPage() {
   // Unsaved-edit safety net (draft) and the delete confirmation.
   const [draftAge, setDraftAge] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [imageProgress, setImageProgress] = useState<{ done: number; total: number } | null>(null);
+  // What the post on screen has cost so far, shown where the spending happened.
+  const [postCost, setPostCost] = useState<PostCost | null>(null);
+  // Wall-clock for a running generation: the honest alternative to inventing
+  // server-side progress the API does not report.
+  const [elapsed, setElapsed] = useState(0);
 
   const hasKey = (provider: string) =>
     keyStatuses.some((status) => status.provider === provider && status.configured);
@@ -125,6 +145,12 @@ export default function DashboardPage() {
       if (response.ok) {
         const data = await response.json();
         setSavedPosts(data.posts);
+        // Generation just changed what the open post has cost; the list
+        // already carries the new figure, so reuse it rather than re-querying.
+        if (currentPostId) {
+          const current = (data.posts as SavedPost[]).find((post) => post.id === currentPostId);
+          if (current?.cost) setPostCost(current.cost);
+        }
       }
     } catch (error) {
       console.error('Error fetching saved posts:', error);
@@ -163,6 +189,17 @@ export default function DashboardPage() {
     return () => clearTimeout(timer);
   }, [isEditMode, editedContent, currentPostId, blogResult]);
 
+  // Tick while anything is generating, so a long wait shows movement.
+  useEffect(() => {
+    if (!generatingBlog && !generatingImages) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [generatingBlog, generatingImages]);
+
   // Handle browser back button
   useEffect(() => {
     const handlePopState = () => {
@@ -172,12 +209,17 @@ export default function DashboardPage() {
       setCurrentTopic('');
       setCurrentPostId(null);
       setIsEditMode(false);
+      setPostCost(null);
+      setDraftAge(null);
       // Refresh saved posts to show newly created content
       fetchSavedPosts();
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
+    // Bound once on mount: the handler clears the view, so the only thing it
+    // reads from a later render is the post list fetch, which is idempotent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fetchTopicRecommendations = async () => {
@@ -195,7 +237,24 @@ export default function DashboardPage() {
     }
   };
 
-  const loadSavedPost = (post: SavedPost) => {
+  const loadSavedPost = async (listPost: SavedPost) => {
+    // The list carries no images — it is a list of titles. Fetch the full post.
+    let post = listPost;
+    try {
+      const response = await fetch(`/api/blog-posts?id=${encodeURIComponent(listPost.id)}`);
+      if (response.ok) {
+        const data = await response.json();
+        post = { ...listPost, ...data.post };
+      }
+    } catch (error) {
+      console.error('Error loading post:', error);
+    }
+
+    setPostCost(listPost.cost ?? null);
+    loadPostIntoView(post);
+  };
+
+  const loadPostIntoView = (post: SavedPost) => {
     console.log('Loading saved post:', post);
     console.log('Image keywords:', post.image_keywords);
     console.log('Saved images:', post.images);
@@ -388,67 +447,19 @@ export default function DashboardPage() {
     setIsEditMode(!isEditMode);
   };
 
-  const handleGenerateImages = async () => {
-    // Use imagePrompts (limited to 5)
-    if (imagePrompts.length === 0) {
-      showToast('error', '이미지 프롬프트가 없습니다.');
-      return;
-    }
-
-    setGeneratingImages(true);
-
-    try {
-      const response = await fetch('/api/generate-images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          keywords: imagePrompts,
-          topic: currentTopic,
-          blogPostId: currentPostId,
-          imageProvider,
-          imageQuality,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setGeneratedImages(data.images);
-        if (data.warning) showToast('error', data.warning);
-        // Refresh saved posts to update with newly generated images
-        fetchSavedPosts();
-      } else {
-        const errorData = await response.json();
-        console.error('Error response:', errorData);
-        if (errorData.code === 'MISSING_API_KEY') {
-          setApiKeyNotice(errorData.error);
-          fetchTenantInfo();
-        } else {
-          showToast('error', `이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
-        }
-      }
-    } catch (error) {
-      console.error('Error generating images:', error);
-      showToast('error', '이미지 생성 중 오류가 발생했습니다.');
-    } finally {
-      setGeneratingImages(false);
-    }
-  };
-
-  // Overwriting an existing image needs confirmation; generating into an
-  // empty slot doesn't. The dialog is driven by pendingRegenIndex.
-  const handleRegenerateImage = (index: number) => {
-    if (generatedImages[index]) {
-      setPendingRegenIndex(index);
-      return;
-    }
-    void regenerateImage(index);
-  };
-
-  const regenerateImage = async (index: number) => {
+  /**
+   * Generates one slot. Shared by the batch and by single regeneration.
+   *
+   * State is updated through the functional form deliberately: the batch runs
+   * these in parallel, and `[...generatedImages]` from the enclosing scope
+   * would capture the array as it looked when the call started, so the last
+   * response to land would erase every image that arrived before it.
+   */
+  const generateSingleImage = async (index: number): Promise<boolean> => {
     const prompt = imagePrompts[index];
+    if (!prompt) return false;
 
-    // Add index to regenerating set
-    setRegeneratingIndices(prev => new Set(prev).add(index));
+    setRegeneratingIndices((prev) => new Set(prev).add(index));
 
     try {
       const response = await fetch('/api/generate-images', {
@@ -472,34 +483,85 @@ export default function DashboardPage() {
 
       if (response.ok) {
         const data = await response.json();
-        const newImages = [...generatedImages];
-        newImages[index] = data.image;
-        setGeneratedImages(newImages);
-      } else {
-        const errorData = await response.json();
-        console.error('Error response:', errorData);
-        if (errorData.code === 'MISSING_API_KEY') {
-          setApiKeyNotice(errorData.error);
-          fetchTenantInfo();
-        } else {
-          showToast('error', `이미지 재생성에 실패했습니다. ${errorData.error || ''}`.trim());
-        }
+        setGeneratedImages((prev) => {
+          const next = [...prev];
+          next[index] = data.image;
+          return next;
+        });
+        return true;
       }
+
+      const errorData = await response.json();
+      console.error('Error response:', errorData);
+      if (errorData.code === 'MISSING_API_KEY') {
+        setApiKeyNotice(errorData.error);
+        fetchTenantInfo();
+      } else {
+        showToast('error', `${index + 1}번 이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
+      }
+      return false;
     } catch (error) {
-      console.error('Error regenerating image:', error);
-      showToast('error', '이미지 재생성 중 오류가 발생했습니다.');
+      console.error('Error generating image:', error);
+      showToast('error', `${index + 1}번 이미지 생성 중 오류가 발생했습니다.`);
+      return false;
     } finally {
-      // Remove index from regenerating set
-      setRegeneratingIndices(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(index);
-        return newSet;
+      setRegeneratingIndices((prev) => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
       });
     }
   };
 
-  // Confirms inline on the button itself rather than interrupting with a
-  // dialog for what is a trivially reversible action.
+  /**
+   * The batch is N parallel single-image requests rather than one request that
+   * makes N images. Two reasons, both user-visible: each image appears the
+   * moment it is ready instead of all five landing together after four
+   * minutes, and each gets its own serverless time budget — a five-image High
+   * batch no longer has to fit inside one function's limit.
+   */
+  const handleGenerateImages = async () => {
+    if (imagePrompts.length === 0) {
+      showToast('error', '이미지 프롬프트가 없습니다.');
+      return;
+    }
+
+    setGeneratingImages(true);
+    setImageProgress({ done: 0, total: imagePrompts.length });
+
+    try {
+      const results = await Promise.all(
+        imagePrompts.map((_, index) =>
+          generateSingleImage(index).then((ok) => {
+            setImageProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+            return ok;
+          })
+        )
+      );
+
+      const failed = results.filter((ok) => !ok).length;
+      if (failed === 0) {
+        showToast('success', `이미지 ${results.length}장을 만들었습니다.`);
+      }
+      fetchSavedPosts();
+    } finally {
+      setGeneratingImages(false);
+      setImageProgress(null);
+    }
+  };
+
+  // Overwriting an existing image needs confirmation; generating into an
+  // empty slot doesn't. The dialog is driven by pendingRegenIndex.
+  const handleRegenerateImage = (index: number) => {
+    if (generatedImages[index]) {
+      setPendingRegenIndex(index);
+      return;
+    }
+    void regenerateImage(index);
+  };
+
+  // Single regeneration is the same call the batch makes for one slot.
+  const regenerateImage = (index: number) => generateSingleImage(index);
   const handleCopyAll = async () => {
     if (!blogResult?.content) return;
     try {
@@ -701,7 +763,20 @@ export default function DashboardPage() {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <p className="text-ink font-medium">블로그 글을 생성하고 있습니다...</p>
+                    <p className="text-ink font-medium">블로그 글을 생성하고 있습니다</p>
+                    {/* Elapsed and a real expected range. The API reports no
+                        intermediate state, so inventing "now searching…"
+                        stages would be fiction — this shows what is actually
+                        known. */}
+                    <p className="mt-2 text-sm text-ink-soft tabular-nums">
+                      {elapsed}초 경과 · 보통 30~90초 걸립니다
+                    </p>
+                    {elapsed > 90 && (
+                      <p className="mt-2 text-xs text-ink-faint text-center max-w-[22rem]">
+                        자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도
+                        글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -725,6 +800,18 @@ export default function DashboardPage() {
                     버리기
                   </button>
                 </div>
+              </div>
+            )}
+
+            {postCost?.totalUsd !== null && postCost !== null && (
+              <div className="flex items-baseline gap-2 text-sm text-ink-soft">
+                <span>이 글에 든 비용</span>
+                <span className="font-semibold text-ink tabular-nums">
+                  {formatUsd(postCost.totalUsd)}
+                </span>
+                <span className="text-xs text-ink-faint">
+                  (본문 {formatUsd(postCost.textUsd)} + 이미지 {formatUsd(postCost.imageUsd)})
+                </span>
               </div>
             )}
 
@@ -802,7 +889,14 @@ export default function DashboardPage() {
               {imagePrompts.length > 0 && (
                 <div className="bg-accent-tint border border-line rounded-card p-6">
                   <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
-                    <h3 className="font-semibold text-accent-strong">이미지 프롬프트 ({imagePrompts.length}/5)</h3>
+                    <h3 className="font-semibold text-accent-strong">
+                      이미지 프롬프트 ({imagePrompts.length}/5)
+                      {imageProgress && (
+                        <span className="ml-3 font-normal text-sm text-ink-soft tabular-nums">
+                          {imageProgress.done}/{imageProgress.total}장 완료 · {elapsed}초
+                        </span>
+                      )}
+                    </h3>
                     {/* flex-wrap: two selects plus two buttons overflow narrow
                         viewports without it. */}
                     <div className="flex flex-wrap items-center gap-3">
@@ -816,7 +910,10 @@ export default function DashboardPage() {
                         <option value="openai">GPT-Image-2 (OpenAI)</option>
                         <option value="gemini">Gemini 3 Pro Image (Google)</option>
                       </select>
-                      {/* Quality selector — OpenAI only */}
+                      {/* Quality selector — OpenAI only. Priced for the
+                          number of slots actually queued: High is ~36x Low,
+                          and a dropdown that shows only the duration hides
+                          the decision that costs money. */}
                       {imageProvider === 'openai' && (
                         <select
                           aria-label="이미지 품질"
@@ -824,9 +921,18 @@ export default function DashboardPage() {
                           onChange={(e) => setImageQuality(e.target.value as 'low' | 'medium' | 'high')}
                           className="px-3 py-2 border border-line-strong rounded-lg text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-accent"
                         >
-                          <option value="low">Low (~30초)</option>
-                          <option value="medium">Medium (~80초)</option>
-                          <option value="high">High (~250초)</option>
+                          {(['low', 'medium', 'high'] as const).map((tier) => {
+                            const seconds = { low: 30, medium: 80, high: 250 }[tier];
+                            const estimate = calculateImageCost('openai', imagePrompts.length, tier);
+                            return (
+                              <option key={tier} value={tier}>
+                                {tier === 'low' ? 'Low' : tier === 'medium' ? 'Medium' : 'High'}
+                                {` (~${seconds}초`}
+                                {estimate !== null ? ` · ${formatUsd(estimate)}` : ''}
+                                {')'}
+                              </option>
+                            );
+                          })}
                         </select>
                       )}
                       <button
@@ -834,7 +940,11 @@ export default function DashboardPage() {
                         disabled={generatingImages}
                         className={`${btnPrimary} px-4 py-2 text-sm`}
                       >
-                        {generatingImages ? '생성 중...' : '전체 생성'}
+                        {generatingImages && imageProgress
+                          ? `생성 중 ${imageProgress.done}/${imageProgress.total}`
+                          : generatingImages
+                            ? '생성 중...'
+                            : '전체 생성'}
                       </button>
                       <button
                         onClick={() => setEditingPrompts(!editingPrompts)}

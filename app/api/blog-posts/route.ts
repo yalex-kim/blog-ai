@@ -3,8 +3,17 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { getImagesForPost } from '@/lib/image-storage';
 import { getSession } from '@/lib/session';
 import { isTrustedOrigin } from '@/lib/request-security';
+import { summarisePostCost, type CostableUsageRow } from '@/lib/usage-cost';
 
-// GET: Fetch recent blog posts (최근 10개)
+// GET: the tenant's posts — a page of them, searchable.
+//
+// The list deliberately does NOT carry each post's images. It used to: one
+// query for the posts and then one per post for its images, eleven round trips
+// to render a list of titles. Opening a post fetches its images; the list only
+// needs to know how many there are.
+const PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 50;
+
 export async function GET(request: NextRequest) {
   try {
     const sessionData = getSession(request);
@@ -12,23 +21,26 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
     }
 
-    const { data: posts, error } = await supabaseAdmin
-      .from('blog_posts')
-      .select('id, title, topic, created_at, content, image_keywords, reference_links')
-      .eq('tenant_id', sessionData.id)
-      .order('created_at', { ascending: false })
-      .limit(10);
+    const params = request.nextUrl.searchParams;
 
-    if (error) {
-      console.error('Error fetching posts:', error);
-      return NextResponse.json({ error: '글 목록을 불러오는데 실패했습니다.' }, { status: 500 });
-    }
+    // ?id= returns one post with its images — what opening a post needs, and
+    // the reason the list itself can stay free of them.
+    const singleId = params.get('id');
+    if (singleId) {
+      const { data: post, error: postError } = await supabaseAdmin
+        .from('blog_posts')
+        .select('id, title, topic, created_at, content, image_keywords, reference_links, posted_to_blog')
+        .eq('id', singleId)
+        .eq('tenant_id', sessionData.id)
+        .single();
 
-    // Fetch images for each post
-    const postsWithImages = await Promise.all(
-      (posts || []).map(async (post) => {
-        const images = await getImagesForPost(post.id);
-        return {
+      if (postError || !post) {
+        return NextResponse.json({ error: '글을 찾을 수 없습니다.' }, { status: 404 });
+      }
+
+      const images = await getImagesForPost(post.id);
+      return NextResponse.json({
+        post: {
           ...post,
           images: images.map((img) => ({
             keyword: img.keyword,
@@ -39,18 +51,87 @@ export async function GET(request: NextRequest) {
             displayOrder: img.display_order,
             promptId: img.prompt_id,
           })),
-        };
-      })
-    );
+        },
+      });
+    }
 
-    return NextResponse.json({ posts: postsWithImages });
+    const search = (params.get('q') ?? '').trim().slice(0, 100);
+    const offset = Math.max(Number(params.get('offset')) || 0, 0);
+    const limit = Math.min(Math.max(Number(params.get('limit')) || PAGE_SIZE, 1), MAX_PAGE_SIZE);
+
+    let query = supabaseAdmin
+      .from('blog_posts')
+      .select('id, title, topic, created_at, content, image_keywords, reference_links, posted_to_blog', {
+        count: 'exact',
+      })
+      .eq('tenant_id', sessionData.id);
+
+    if (search) {
+      // Escape PostgREST's or() delimiters so a comma or paren in the query
+      // cannot break out of the filter expression.
+      const safe = search.replace(/[,()]/g, ' ');
+      query = query.or(`title.ilike.%${safe}%,topic.ilike.%${safe}%`);
+    }
+
+    const { data: posts, error, count } = await query
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error('Error fetching posts:', error);
+      return NextResponse.json({ error: '글 목록을 불러오는데 실패했습니다.' }, { status: 500 });
+    }
+
+    const ids = (posts ?? []).map((post) => post.id);
+
+    // Two queries for the whole page, not two per post: how many images each
+    // has, and what each cost. Both are scoped to the ids already fetched.
+    const [imageRows, usageRows] = await Promise.all([
+      ids.length
+        ? supabaseAdmin.from('blog_images').select('blog_post_id').in('blog_post_id', ids)
+        : Promise.resolve({ data: [] as { blog_post_id: string }[] }),
+      ids.length
+        ? supabaseAdmin
+            .from('usage_events')
+            .select(
+              'blog_post_id, kind, provider, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, web_search_requests, image_count, image_quality, cost_usd'
+            )
+            .in('blog_post_id', ids)
+        : Promise.resolve({ data: [] as CostableUsageRow[] }),
+    ]);
+
+    const imageCounts = new Map<string, number>();
+    for (const row of (imageRows.data ?? []) as { blog_post_id: string }[]) {
+      imageCounts.set(row.blog_post_id, (imageCounts.get(row.blog_post_id) ?? 0) + 1);
+    }
+
+    const usageByPost = new Map<string, CostableUsageRow[]>();
+    for (const row of (usageRows.data ?? []) as (CostableUsageRow & { blog_post_id: string | null })[]) {
+      if (!row.blog_post_id) continue;
+      usageByPost.set(row.blog_post_id, [...(usageByPost.get(row.blog_post_id) ?? []), row]);
+    }
+
+    const enriched = (posts ?? []).map((post) => ({
+      ...post,
+      imageCount: imageCounts.get(post.id) ?? 0,
+      // How many slots the post expects, so the list can say "3/5".
+      expectedImages: post.image_keywords?.length ?? 0,
+      cost: summarisePostCost(usageByPost.get(post.id) ?? []),
+    }));
+
+    return NextResponse.json({
+      posts: enriched,
+      total: count ?? enriched.length,
+      offset,
+      limit,
+      hasMore: offset + enriched.length < (count ?? 0),
+    });
   } catch (error) {
     console.error('Error in GET /api/blog-posts:', error);
     return NextResponse.json({ error: '서버 오류가 발생했습니다.' }, { status: 500 });
   }
 }
 
-// PUT: Update blog post content
 export async function PUT(request: NextRequest) {
   try {
     if (!isTrustedOrigin(request)) {
