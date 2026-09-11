@@ -128,9 +128,12 @@ ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GEMINI_API_KEY=
 
-# Optional. Per-image cost for the usage dashboard; unset means images are
-# counted but not priced. Take the numbers from the provider's pricing page.
-OPENAI_IMAGE_USD_PER_IMAGE=
+# Optional. Per-image cost overrides for the usage dashboard. gpt-image-2 has
+# built-in rates (1024x1024); Gemini has none, so its images stay unpriced until
+# you set one. A _LOW/_MEDIUM/_HIGH suffix beats the un-suffixed flat value.
+OPENAI_IMAGE_USD_PER_IMAGE_LOW=
+OPENAI_IMAGE_USD_PER_IMAGE_MEDIUM=
+OPENAI_IMAGE_USD_PER_IMAGE_HIGH=
 GEMINI_IMAGE_USD_PER_IMAGE=
 
 # Optional. When set, GET /api/health requires ?token=<value>.
@@ -165,11 +168,20 @@ generation the provider already charged for. `key_source` records whether the
 tenant's key or the platform key paid.
 
 `lib/pricing.ts` holds every rate in one table. Anthropic token and web-search
-rates are from the published pricing page; image rates have no default and come
-from the env vars above. **An unknown rate produces `cost_usd = NULL`, never
-0** — the dashboard reports those as unpriced rather than understating the
-bill. Token and request counts are the provider's own numbers and stay correct
-even when a rate is wrong, so usage can be re-costed later.
+rates are from the published pricing page; gpt-image-2's are per quality tier at
+1024x1024, the size `lib/image-providers` hard-codes — **change that size and
+the image rates stop being right.** Gemini has no built-in rate. Env vars
+override, per tier or flat.
+
+Image quality is the priced unit on OpenAI, not the image count: High is ~36x
+Low. `usage_events.image_quality` records which tier ran, and the dashboard
+breaks the per-model table down by it — a batch costed at a single flat rate
+would be wrong by more than an order of magnitude.
+
+**An unknown rate produces `cost_usd = NULL`, never 0** — the dashboard reports
+those as unpriced rather than understating the bill. Token and request counts
+are the provider's own numbers and stay correct even when a rate is wrong, so
+usage can be re-costed later.
 
 ### Database setup
 

@@ -15,6 +15,7 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
 import { resolveApiKey, missingKeyMessage, KEY_COLUMNS } from '@/lib/tenant-keys';
 import { recordUsage } from '@/lib/usage';
+import { normalizeImageQuality, DEFAULT_IMAGE_QUALITY } from '@/lib/pricing';
 
 // The model each provider actually generates with — recorded on usage rows so
 // the dashboard can name what was billed.
@@ -137,6 +138,11 @@ export async function POST(request: NextRequest) {
 
     const imageProvider = getImageProvider(providerId, imageKey.apiKey);
 
+    // Falling back to the provider's own default rather than null keeps the
+    // recorded quality equal to what was actually generated, which is what the
+    // per-tier rate is looked up by.
+    const quality = normalizeImageQuality(imageQuality) ?? DEFAULT_IMAGE_QUALITY;
+
     // Single image generation (for regeneration)
     if (description !== undefined && index !== undefined) {
       if (typeof description !== 'string' || description.length > MAX_DESCRIPTION_LENGTH) {
@@ -203,7 +209,7 @@ export async function POST(request: NextRequest) {
       const result = await imageProvider.generateImage({
         prompt,
         size: "1024x1024",
-        quality: imageQuality,
+        quality,
       });
 
       // Metered on generation, not on upload: the provider bills for the image
@@ -216,6 +222,7 @@ export async function POST(request: NextRequest) {
         keySource: imageKey.source,
         blogPostId: blogPostId ?? null,
         imageCount: 1,
+        imageQuality: quality,
       });
 
       const b64Image = result.imageData;
@@ -305,7 +312,7 @@ export async function POST(request: NextRequest) {
       const result = await imageProvider.generateImage({
         prompt,
         size: "1024x1024",
-        quality: imageQuality,
+        quality,
       });
 
       const b64Image = result.imageData;
@@ -365,6 +372,7 @@ export async function POST(request: NextRequest) {
         keySource: imageKey.source,
         blogPostId: blogPostId ?? null,
         imageCount: generatedCount,
+        imageQuality: quality,
       });
     }
 

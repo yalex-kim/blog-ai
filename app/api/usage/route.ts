@@ -23,6 +23,7 @@ type UsageRow = {
   cache_read_input_tokens: number;
   web_search_requests: number;
   image_count: number;
+  image_quality: string | null;
   cost_usd: string | number | null;
   created_at: string;
 };
@@ -51,7 +52,7 @@ export async function GET(request: NextRequest) {
     const { data, error } = await supabaseAdmin
       .from('usage_events')
       .select(
-        'kind, provider, model, key_source, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, web_search_requests, image_count, cost_usd, created_at'
+        'kind, provider, model, key_source, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, web_search_requests, image_count, image_quality, cost_usd, created_at'
       )
       .eq('tenant_id', sessionData.id)
       .gte('created_at', since)
@@ -96,6 +97,7 @@ export async function GET(request: NextRequest) {
         provider: string;
         model: string;
         kind: string;
+        imageQuality: string | null;
         events: number;
         inputTokens: number;
         outputTokens: number;
@@ -131,11 +133,14 @@ export async function GET(request: NextRequest) {
       day.events += 1;
       byDay.set(date, day);
 
-      const modelKey = `${row.provider}::${row.model}::${row.kind}`;
+      // Image rows split by quality tier: that, not the model, is what the
+      // price varies by, so folding the tiers together would hide the spend.
+      const modelKey = `${row.provider}::${row.model}::${row.kind}::${row.image_quality ?? ''}`;
       const entry = byModel.get(modelKey) ?? {
         provider: row.provider,
         model: row.model,
         kind: row.kind,
+        imageQuality: row.image_quality,
         events: 0,
         inputTokens: 0,
         outputTokens: 0,
@@ -174,6 +179,7 @@ export async function GET(request: NextRequest) {
         outputTokens: row.output_tokens,
         webSearchRequests: row.web_search_requests,
         imageCount: row.image_count,
+        imageQuality: row.image_quality,
         costUsd: toNumber(row.cost_usd),
         createdAt: row.created_at,
       })),

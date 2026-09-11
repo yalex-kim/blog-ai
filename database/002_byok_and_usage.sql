@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
   -- Billed separately from tokens at $10 per 1,000 searches.
   web_search_requests         INTEGER NOT NULL DEFAULT 0,
   image_count                 INTEGER NOT NULL DEFAULT 0,
+  -- low | medium | high, or NULL for a provider without quality tiers.
+  -- OpenAI prices each tier differently, so the count alone cannot be costed.
+  image_quality               TEXT,
 
   -- Estimate. NULL = could not be priced (unknown model, or an image provider
   -- with no configured per-image rate). Read it as "unknown", never as zero.

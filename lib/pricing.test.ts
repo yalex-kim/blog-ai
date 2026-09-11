@@ -5,12 +5,17 @@ import {
   imageRateUsd,
   isModelPriced,
   formatUsd,
+  normalizeImageQuality,
+  DEFAULT_IMAGE_QUALITY,
   WEB_SEARCH_USD_PER_REQUEST,
   TEXT_MODEL_RATES,
 } from './pricing';
 
 afterEach(() => {
   delete process.env.OPENAI_IMAGE_USD_PER_IMAGE;
+  delete process.env.OPENAI_IMAGE_USD_PER_IMAGE_LOW;
+  delete process.env.OPENAI_IMAGE_USD_PER_IMAGE_MEDIUM;
+  delete process.env.OPENAI_IMAGE_USD_PER_IMAGE_HIGH;
   delete process.env.GEMINI_IMAGE_USD_PER_IMAGE;
 });
 
@@ -80,14 +85,30 @@ describe('calculateTextCost', () => {
 });
 
 describe('image pricing', () => {
-  it('is unpriced until a rate is configured', () => {
-    expect(imageRateUsd('openai')).toBeNull();
-    expect(calculateImageCost('openai', 7)).toBeNull();
+  it('prices gpt-image-2 from the built-in 1024x1024 table', () => {
+    expect(imageRateUsd('openai', 'low')).toBeCloseTo(0.00588, 10);
+    expect(imageRateUsd('openai', 'medium')).toBeCloseTo(0.05268, 10);
+    expect(imageRateUsd('openai', 'high')).toBeCloseTo(0.21072, 10);
   });
 
-  it('uses the configured per-image rate', () => {
+  it('costs an unspecified quality at the default tier, not at zero', () => {
+    expect(imageRateUsd('openai')).toBeCloseTo(0.00588, 10);
+  });
+
+  it('leaves Gemini unpriced until a rate is supplied', () => {
+    expect(imageRateUsd('gemini')).toBeNull();
+    expect(calculateImageCost('gemini', 7)).toBeNull();
+  });
+
+  it('lets an env var override the built-in rate', () => {
     process.env.OPENAI_IMAGE_USD_PER_IMAGE = '0.02';
-    expect(calculateImageCost('openai', 7)).toBeCloseTo(0.14, 10);
+    expect(calculateImageCost('openai', 7, 'high')).toBeCloseTo(0.14, 10);
+  });
+
+  it('costs a five-image batch by tier', () => {
+    // The realistic case: a post's five slots, all at one quality.
+    expect(calculateImageCost('openai', 5, 'low')).toBeCloseTo(0.0294, 10);
+    expect(calculateImageCost('openai', 5, 'high')).toBeCloseTo(1.0536, 10);
   });
 
   it('ignores a non-numeric or negative rate', () => {
@@ -99,6 +120,44 @@ describe('image pricing', () => {
 
   it('is null for an unknown provider', () => {
     expect(imageRateUsd('midjourney')).toBeNull();
+  });
+
+  it('prices each quality tier separately — a High image is not a Low image', () => {
+    // High is ~36x Low, so folding the tiers together would be badly wrong.
+    const low = calculateImageCost('openai', 5, 'low')!;
+    const high = calculateImageCost('openai', 5, 'high')!;
+    expect(high / low).toBeGreaterThan(30);
+  });
+
+  it('prefers a per-tier env var over the flat one', () => {
+    process.env.OPENAI_IMAGE_USD_PER_IMAGE = '0.02';
+    process.env.OPENAI_IMAGE_USD_PER_IMAGE_HIGH = '0.17';
+
+    expect(imageRateUsd('openai', 'high')).toBeCloseTo(0.17, 10);
+    expect(imageRateUsd('openai', 'low')).toBeCloseTo(0.02, 10);
+  });
+
+  it('supplies a Gemini rate from the env var', () => {
+    process.env.GEMINI_IMAGE_USD_PER_IMAGE = '0.05';
+    expect(imageRateUsd('gemini', 'high')).toBeCloseTo(0.05, 10);
+  });
+});
+
+describe('normalizeImageQuality', () => {
+  it('accepts the three tiers', () => {
+    expect(normalizeImageQuality('low')).toBe('low');
+    expect(normalizeImageQuality('medium')).toBe('medium');
+    expect(normalizeImageQuality('high')).toBe('high');
+  });
+
+  it('rejects anything else, so an arbitrary string never reaches the provider', () => {
+    expect(normalizeImageQuality('ultra')).toBeNull();
+    expect(normalizeImageQuality(undefined)).toBeNull();
+    expect(normalizeImageQuality(4)).toBeNull();
+  });
+
+  it("defaults to the provider's own default tier", () => {
+    expect(DEFAULT_IMAGE_QUALITY).toBe('low');
   });
 });
 

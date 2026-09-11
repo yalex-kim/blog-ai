@@ -32,22 +32,70 @@ export const TEXT_MODEL_RATES: Record<string, TextModelRate> = {
 /** $10 per 1,000 searches, billed on top of tokens. Same source as above. */
 export const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 
-// Image generation is priced per image by both providers, but their pricing
-// pages are not reachable from this build environment and a made-up number in a
-// billing dashboard is worse than an honest blank. So: no default. Set
-// OPENAI_IMAGE_USD_PER_IMAGE / GEMINI_IMAGE_USD_PER_IMAGE from the provider's
-// current pricing page and the dashboard starts costing images; until then it
-// reports the image COUNT and marks the cost as unpriced.
-const IMAGE_RATE_ENV_VARS: Record<string, string> = {
+/** The quality tiers the dashboard offers. OpenAI prices each differently. */
+export const IMAGE_QUALITIES = ['low', 'medium', 'high'] as const;
+export type ImageQuality = (typeof IMAGE_QUALITIES)[number];
+
+/** Matches OpenAIImageProvider's own default, so an unspecified quality is
+ *  costed as what was actually generated. */
+export const DEFAULT_IMAGE_QUALITY: ImageQuality = 'low';
+
+export function normalizeImageQuality(value: unknown): ImageQuality | null {
+  return typeof value === 'string' && (IMAGE_QUALITIES as readonly string[]).includes(value)
+    ? (value as ImageQuality)
+    : null;
+}
+
+// Image generation is priced per image, and on OpenAI the price depends on both
+// the quality tier the dashboard lets the user pick and the size. THESE RATES
+// ARE FOR 1024x1024, which is what lib/image-providers hard-codes for every
+// slot — change that size and these numbers stop being right.
+//
+// gpt-image-2 source: developers.openai.com/api/docs/pricing (2026-09-11).
+// Gemini has no built-in rate: its pricing page was not reachable when this was
+// written, and a made-up number in a billing view is worse than an honest
+// blank, so Gemini images stay unpriced until an env var supplies a rate.
+//
+// Override or supply rates with, in precedence order:
+//   OPENAI_IMAGE_USD_PER_IMAGE_LOW / _MEDIUM / _HIGH   (per tier)
+//   OPENAI_IMAGE_USD_PER_IMAGE                          (flat, all tiers)
+//   the built-in table below
+// and the same shape for GEMINI_IMAGE_USD_PER_IMAGE[_TIER].
+const IMAGE_RATE_ENV_PREFIX: Record<string, string> = {
   openai: 'OPENAI_IMAGE_USD_PER_IMAGE',
   gemini: 'GEMINI_IMAGE_USD_PER_IMAGE',
 };
 
-export function imageRateUsd(provider: string): number | null {
-  const raw = process.env[IMAGE_RATE_ENV_VARS[provider] ?? ''];
+const IMAGE_RATES: Record<string, Record<ImageQuality, number> | null> = {
+  // gpt-image-2, 1024x1024
+  openai: { low: 0.00588, medium: 0.05268, high: 0.21072 },
+  // gemini-3-pro-image-preview — rate unknown, see above
+  gemini: null,
+};
+
+function readRate(name: string): number | null {
+  const raw = process.env[name];
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function imageRateUsd(provider: string, quality?: ImageQuality | null): number | null {
+  const prefix = IMAGE_RATE_ENV_PREFIX[provider];
+  if (!prefix) return null;
+
+  if (quality) {
+    const tiered = readRate(`${prefix}_${quality.toUpperCase()}`);
+    if (tiered !== null) return tiered;
+  }
+
+  const flat = readRate(prefix);
+  if (flat !== null) return flat;
+
+  const table = IMAGE_RATES[provider];
+  if (!table) return null;
+
+  return table[quality ?? DEFAULT_IMAGE_QUALITY];
 }
 
 export interface TokenUsage {
@@ -103,8 +151,12 @@ export function calculateTextCost(model: string, usage: TokenUsage): CostBreakdo
   };
 }
 
-export function calculateImageCost(provider: string, imageCount: number): number | null {
-  const rate = imageRateUsd(provider);
+export function calculateImageCost(
+  provider: string,
+  imageCount: number,
+  quality?: ImageQuality | null
+): number | null {
+  const rate = imageRateUsd(provider, quality);
   if (rate === null) return null;
   return rate * imageCount;
 }

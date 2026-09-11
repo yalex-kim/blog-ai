@@ -27,6 +27,7 @@ interface UsageResponse {
     provider: string;
     model: string;
     kind: string;
+    imageQuality: string | null;
     events: number;
     inputTokens: number;
     outputTokens: number;
@@ -212,9 +213,8 @@ export default function UsagePage() {
             {data.summary.unpricedEvents > 0 && (
               <div className="mb-6 bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded text-sm">
                 {numberFormat.format(data.summary.unpricedEvents)}건은 단가 정보가 없어
-                금액에 포함되지 않았습니다. 이미지 생성 단가는 배포 환경변수
-                (<code>OPENAI_IMAGE_USD_PER_IMAGE</code> /{' '}
-                <code>GEMINI_IMAGE_USD_PER_IMAGE</code>)로 설정할 수 있습니다.
+                금액에 포함되지 않았습니다. Gemini 이미지 단가는 기본값이 없어{' '}
+                <code>GEMINI_IMAGE_USD_PER_IMAGE</code> 환경변수로 설정해야 합니다.
               </div>
             )}
 
@@ -264,11 +264,16 @@ export default function UsagePage() {
                 <tbody>
                   {data.byModel.map((row) => (
                     <tr
-                      key={`${row.provider}-${row.model}-${row.kind}`}
+                      key={`${row.provider}-${row.model}-${row.kind}-${row.imageQuality ?? ''}`}
                       className="border-b border-line last:border-0"
                     >
                       <td className="py-2 text-ink">{KIND_LABELS[row.kind] ?? row.kind}</td>
-                      <td className="py-2 text-ink-soft font-mono text-xs">{row.model}</td>
+                      <td className="py-2 text-ink-soft font-mono text-xs">
+                        {row.model}
+                        {row.imageQuality && (
+                          <span className="ml-1 text-ink-faint">({row.imageQuality})</span>
+                        )}
+                      </td>
                       <td className="py-2 text-right tabular-nums text-ink">
                         {numberFormat.format(row.events)}
                       </td>

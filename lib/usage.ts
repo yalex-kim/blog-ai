@@ -1,5 +1,10 @@
 import { supabaseAdmin } from './supabase';
-import { calculateTextCost, calculateImageCost, type TokenUsage } from './pricing';
+import {
+  calculateTextCost,
+  calculateImageCost,
+  type TokenUsage,
+  type ImageQuality,
+} from './pricing';
 import type { KeySource } from './tenant-keys';
 
 export type UsageKind = 'blog_generation' | 'topic_recommendation' | 'image_generation';
@@ -13,6 +18,9 @@ export interface UsageEvent {
   blogPostId?: string | null;
   tokens?: TokenUsage;
   imageCount?: number;
+  /** OpenAI prices per quality tier, so costing a batch needs to know which
+   *  one ran — not just how many images came out. */
+  imageQuality?: ImageQuality | null;
 }
 
 /**
@@ -52,7 +60,7 @@ export async function recordUsage(event: UsageEvent): Promise<void> {
     const cost =
       event.kind === 'image_generation'
         ? {
-            totalUsd: calculateImageCost(event.provider, imageCount),
+            totalUsd: calculateImageCost(event.provider, imageCount, event.imageQuality),
             webSearchUsd: 0,
           }
         : calculateTextCost(event.model, event.tokens ?? {});
@@ -71,6 +79,7 @@ export async function recordUsage(event: UsageEvent): Promise<void> {
         cache_read_input_tokens: event.tokens?.cacheReadInputTokens ?? 0,
         web_search_requests: event.tokens?.webSearchRequests ?? 0,
         image_count: imageCount,
+        image_quality: event.imageQuality ?? null,
         // Null means "we could not price this" — an unknown model, or an image
         // provider with no configured rate. The dashboard reports those rows as
         // unpriced rather than folding them in as $0.
