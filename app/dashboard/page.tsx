@@ -94,6 +94,10 @@ export default function DashboardPage() {
 
   // New states for saved posts
   const [savedPosts, setSavedPosts] = useState<SavedPost[]>([]);
+  const [postSearch, setPostSearch] = useState('');
+  const [postsTotal, setPostsTotal] = useState(0);
+  const [postsHasMore, setPostsHasMore] = useState(false);
+  const [loadingMorePosts, setLoadingMorePosts] = useState(false);
   const [currentPostId, setCurrentPostId] = useState<string | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editedContent, setEditedContent] = useState('');
@@ -179,21 +183,46 @@ export default function DashboardPage() {
     }
   };
 
-  const fetchSavedPosts = async () => {
+  /**
+   * `append` distinguishes "load the next page" from every other refresh —
+   * after generating or deleting, the list must reset to the first page rather
+   * than stack another copy of it onto what is already there.
+   */
+  const fetchSavedPosts = async (options?: { search?: string; offset?: number; append?: boolean }) => {
+    const search = options?.search ?? postSearch;
+    const offset = options?.offset ?? 0;
+
     try {
-      const response = await fetch('/api/blog-posts');
-      if (response.ok) {
-        const data = await response.json();
-        setSavedPosts(data.posts);
-        // Generation just changed what the open post has cost; the list
-        // already carries the new figure, so reuse it rather than re-querying.
-        if (currentPostId) {
-          const current = (data.posts as SavedPost[]).find((post) => post.id === currentPostId);
-          if (current?.cost) setPostCost(current.cost);
-        }
+      const params = new URLSearchParams({ offset: String(offset) });
+      if (search.trim()) params.set('q', search.trim());
+
+      const response = await fetch(`/api/blog-posts?${params}`);
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setSavedPosts((current) =>
+        options?.append ? [...current, ...data.posts] : data.posts
+      );
+      setPostsTotal(data.total ?? 0);
+      setPostsHasMore(!!data.hasMore);
+
+      // Generation just changed what the open post has cost; the list already
+      // carries the new figure, so reuse it rather than re-querying.
+      if (currentPostId) {
+        const current = (data.posts as SavedPost[]).find((post) => post.id === currentPostId);
+        if (current?.cost) setPostCost(current.cost);
       }
     } catch (error) {
       console.error('Error fetching saved posts:', error);
+    }
+  };
+
+  const loadMorePosts = async () => {
+    setLoadingMorePosts(true);
+    try {
+      await fetchSavedPosts({ offset: savedPosts.length, append: true });
+    } finally {
+      setLoadingMorePosts(false);
     }
   };
 
@@ -763,39 +792,108 @@ export default function DashboardPage() {
             </div>
 
             {/* Saved Posts */}
-            {savedPosts.length > 0 && (
+            {(savedPosts.length > 0 || postSearch) && (
               <div className="bg-surface rounded-card shadow-card p-6">
-                <h3 className="text-lg font-semibold mb-4">저장된 글 (최근 10개)</h3>
-                <div className="space-y-2">
-                  {savedPosts.map((post) => (
-                    <div
-                      key={post.id}
-                      className="flex items-start gap-2 px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
-                    >
-                      {/* The row and the delete control are siblings: a button
-                          cannot legally contain another button. */}
-                      <button
-                        onClick={() => loadSavedPost(post)}
-                        className="flex-1 min-w-0 text-left"
-                      >
-                        <h4 className="font-medium text-ink truncate">{post.title}</h4>
-                        <p className="text-sm text-ink-faint mt-1 truncate">{post.topic}</p>
-                      </button>
-                      <div className="flex items-center gap-3 shrink-0">
-                        <span className="text-xs text-ink-faint tabular-nums">
-                          {new Date(post.created_at).toLocaleDateString('ko-KR')}
-                        </span>
-                        <button
-                          onClick={() => setPendingDeleteId(post.id)}
-                          aria-label={`${post.title} 삭제`}
-                          className="rounded px-2 py-1 text-sm text-ink-faint hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                        >
-                          삭제
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                <div className="flex items-baseline justify-between gap-3 flex-wrap mb-4">
+                  <h3 className="text-lg font-semibold">
+                    저장된 글
+                    {postsTotal > 0 && (
+                      <span className="ml-2 text-sm font-normal text-ink-faint tabular-nums">
+                        {postsTotal}개
+                      </span>
+                    )}
+                  </h3>
+                  <input
+                    id="post-search"
+                    type="search"
+                    value={postSearch}
+                    onChange={(e) => {
+                      setPostSearch(e.target.value);
+                      fetchSavedPosts({ search: e.target.value, offset: 0 });
+                    }}
+                    placeholder="제목이나 주제로 검색"
+                    aria-label="저장된 글 검색"
+                    className="w-full sm:w-64 px-3 py-2 border border-line-strong rounded-lg text-sm focus:ring-2 focus:ring-accent"
+                  />
                 </div>
+
+                {savedPosts.length === 0 ? (
+                  <p className="text-sm text-ink-faint py-6 text-center">
+                    &ldquo;{postSearch}&rdquo;와 일치하는 글이 없습니다.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {savedPosts.map((post) => {
+                      const expected = post.expectedImages ?? 0;
+                      const made = post.imageCount ?? 0;
+                      return (
+                        <div
+                          key={post.id}
+                          className="flex items-start gap-2 px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
+                        >
+                          {/* The row and the delete control are siblings: a
+                              button cannot legally contain another button. */}
+                          <button
+                            onClick={() => loadSavedPost(post)}
+                            className="flex-1 min-w-0 text-left"
+                          >
+                            <h4 className="font-medium text-ink truncate">{post.title}</h4>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
+                              <p className="text-sm text-ink-faint truncate">{post.topic}</p>
+                              {/* State the list could not show before: what is
+                                  finished and what still needs work. */}
+                              {expected > 0 && (
+                                <span
+                                  className={`text-xs px-1.5 py-0.5 rounded ${
+                                    made >= expected
+                                      ? 'bg-green-50 text-green-700'
+                                      : 'bg-accent-tint text-accent-strong'
+                                  }`}
+                                >
+                                  이미지 {made}/{expected}
+                                </span>
+                              )}
+                              {post.posted_to_blog && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-green-50 text-green-700">
+                                  발행 완료
+                                </span>
+                              )}
+                              {post.cost?.totalUsd != null && (
+                                <span className="text-xs text-ink-faint tabular-nums">
+                                  {formatUsd(post.cost.totalUsd)}
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-xs text-ink-faint tabular-nums">
+                              {new Date(post.created_at).toLocaleDateString('ko-KR')}
+                            </span>
+                            <button
+                              onClick={() => setPendingDeleteId(post.id)}
+                              aria-label={`${post.title} 삭제`}
+                              className="rounded px-2 py-1 text-sm text-ink-faint hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                            >
+                              삭제
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {postsHasMore && (
+                  <button
+                    onClick={loadMorePosts}
+                    disabled={loadingMorePosts}
+                    className={`${btnSecondary} w-full mt-3 py-2 text-sm`}
+                  >
+                    {loadingMorePosts
+                      ? '불러오는 중...'
+                      : `더 보기 (${savedPosts.length}/${postsTotal})`}
+                  </button>
+                )}
               </div>
             )}
 
