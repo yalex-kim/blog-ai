@@ -38,9 +38,11 @@ interface BlogResult {
 interface GeneratedImage {
   keyword: string;
   text?: string;
+  /** Empty when the slot failed — check before rendering, never pass to <Image>. */
   url: string;
   prompt: string;
   type?: string;
+  error?: string;
 }
 
 interface EditableImagePrompt {
@@ -633,6 +635,19 @@ export default function DashboardPage() {
         setApiKeyNotice(errorData.error);
         fetchTenantInfo();
       } else {
+        // Record the failure on the slot as well as in a toast: the card is
+        // where the user looks to see which image is missing and why.
+        setGeneratedImages((prev) => {
+          const next = [...prev];
+          next[index] = {
+            keyword: imagePrompts[index]?.description ?? '',
+            url: '',
+            prompt: '',
+            type: imagePrompts[index]?.type,
+            error: errorData.error || '이미지 생성에 실패했습니다.',
+          };
+          return next;
+        });
         showToast('error', `${index + 1}번 이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
       }
       return false;
@@ -1230,7 +1245,13 @@ export default function DashboardPage() {
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {imagePrompts.map((prompt, index) => {
-                      const image = generatedImages[index];
+                      const entry = generatedImages[index];
+                      // An entry can exist without a usable URL: a slot that
+                      // failed or timed out still gets one, carrying its error.
+                      // `<Image src="">` throws, so presence of the object is
+                      // not presence of an image.
+                      const image = entry?.url ? entry : undefined;
+                      const slotError = !image ? entry?.error : undefined;
                       const isRegenerating = regeneratingIndices.has(index);
 
                       return (
@@ -1342,8 +1363,20 @@ export default function DashboardPage() {
                                 />
                               </div>
                             ) : (
-                              <div className="w-full aspect-square bg-accent-tint rounded-lg flex items-center justify-center border-2 border-dashed border-line-strong">
-                                <p className="text-ink-faint text-sm text-center px-2">이미지 없음</p>
+                              <div
+                                className={`w-full aspect-square rounded-lg flex items-center justify-center border-2 border-dashed px-3 ${
+                                  slotError
+                                    ? 'bg-red-50 border-red-200'
+                                    : 'bg-accent-tint border-line-strong'
+                                }`}
+                              >
+                                <p
+                                  className={`text-sm text-center break-keep ${
+                                    slotError ? 'text-red-700' : 'text-ink-faint'
+                                  }`}
+                                >
+                                  {slotError ?? '이미지 없음'}
+                                </p>
                               </div>
                             )}
                             <div className="flex flex-col gap-2">

@@ -204,10 +204,19 @@ export async function POST(request: NextRequest) {
 
     const { keywords, topic, description, text, type: requestedType, index, blogPostId, replaceExisting, promptId, imageProvider: providerOverride, imageQuality } = await request.json();
 
-    if (blogPostId !== undefined && blogPostId !== null) {
-      if (typeof blogPostId !== 'string' || !(await verifyBlogPostOwnership(blogPostId, sessionData.id))) {
-        return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
-      }
+    // Checked before any provider call, because an image generated without a
+    // post to attach it to is billed and then lost — Storage and blog_images
+    // are both keyed by the post. It used to be generated anyway and returned
+    // as a success carrying an empty url, which the client then tried to
+    // render.
+    if (typeof blogPostId !== 'string' || !blogPostId) {
+      return NextResponse.json(
+        { error: '글을 먼저 저장한 뒤 이미지를 생성할 수 있습니다.', code: 'NO_BLOG_POST' },
+        { status: 400 }
+      );
+    }
+    if (!(await verifyBlogPostOwnership(blogPostId, sessionData.id))) {
+      return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
     }
 
     // Loaded once for the whole request — both the single-image and batch paths
@@ -282,7 +291,16 @@ export async function POST(request: NextRequest) {
 
       const b64Image = result.imageData;
 
-      if (blogPostId && b64Image) {
+      if (!b64Image) {
+        // Billed but unusable. Say so rather than answering with an image
+        // object whose url is the empty string.
+        return NextResponse.json(
+          { error: '이미지 데이터를 받지 못했습니다. 다시 시도해주세요.' },
+          { status: 502 }
+        );
+      }
+
+      {
         try {
           const imageBuffer = Buffer.from(b64Image, 'base64');
           const finalImageUrl = await uploadImageFromBuffer(imageBuffer);
@@ -328,15 +346,11 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      return NextResponse.json({
-        image: {
-          keyword: cleanDescription,
-          url: '',
-          prompt: prompt,
-          type: type,
-        },
-        index,
-      });
+      // Unreachable: every branch above either returns an image or an error.
+      return NextResponse.json(
+        { error: '이미지 생성에 실패했습니다.' },
+        { status: 500 }
+      );
     }
 
     // Batch image generation
