@@ -396,6 +396,10 @@ export default function DashboardPage() {
 
   const generateBlog = async (topic: string) => {
     setGeneratingBlog(true);
+    // The topic that starts a generation is usually a recommendation halfway
+    // down the page, and the progress card is at the top. Without this the
+    // click looks like it did nothing at all.
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     setBlogResult(null);
     setGeneratedImages([]);
     setCurrentTopic(topic);
@@ -729,6 +733,49 @@ export default function DashboardPage() {
             : 'max-w-6xl py-8'
         }`}
       >
+        {generatingBlog && (
+          /* Inline rather than a full-screen overlay: a 90-second block on
+             the whole page stops the user reading their own saved posts,
+             and told them nothing the page could not say in place. */
+          <div
+            role="status"
+            aria-live="polite"
+            className="sticky top-4 z-30 mb-6 bg-surface rounded-card shadow-card p-6 border border-accent/40"
+          >
+            <div className="flex items-start gap-4">
+              <svg
+                aria-hidden="true"
+                className="animate-spin h-6 w-6 shrink-0 text-accent mt-0.5"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <div className="min-w-0">
+                <p className="text-ink font-medium">
+                  &ldquo;{currentTopic}&rdquo; 글을 생성하고 있습니다
+                </p>
+                <p className="mt-1 text-sm text-ink-soft tabular-nums">
+                  {elapsed}초 경과 · 보통 30~90초 걸립니다
+                </p>
+                <p className="mt-2 text-xs text-ink-faint">
+                  {elapsed > 90
+                    ? '자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도 글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.'
+                    : '이 화면을 벗어나도 글은 저장됩니다.'}
+                </p>
+              </div>
+              <button
+                onClick={cancelBlogGeneration}
+                className={`${btnSecondary} shrink-0 px-4 py-2 text-sm`}
+              >
+                중단
+              </button>
+            </div>
+          </div>
+        )}
+
         {(apiKeyNotice || (keysLoaded && !hasKey('anthropic'))) && (
           <div className="mb-6 bg-yellow-50 border border-yellow-200 rounded-card px-5 py-4 flex items-start justify-between gap-4 flex-wrap">
             <div>
@@ -935,48 +982,6 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {generatingBlog && (
-              /* Inline rather than a full-screen overlay: a 90-second block on
-                 the whole page stops the user reading their own saved posts,
-                 and told them nothing the page could not say in place. */
-              <div
-                role="status"
-                aria-live="polite"
-                className="mt-6 bg-surface rounded-card shadow-card p-6 border border-accent/30"
-              >
-                <div className="flex items-start gap-4">
-                  <svg
-                    aria-hidden="true"
-                    className="animate-spin h-6 w-6 shrink-0 text-accent mt-0.5"
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <div className="min-w-0">
-                    <p className="text-ink font-medium">
-                      &ldquo;{currentTopic}&rdquo; 글을 생성하고 있습니다
-                    </p>
-                    <p className="mt-1 text-sm text-ink-soft tabular-nums">
-                      {elapsed}초 경과 · 보통 30~90초 걸립니다
-                    </p>
-                    <p className="mt-2 text-xs text-ink-faint">
-                      {elapsed > 90
-                        ? '자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도 글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.'
-                        : '이 화면을 벗어나도 글은 저장됩니다.'}
-                    </p>
-                  </div>
-                  <button
-                    onClick={cancelBlogGeneration}
-                    className={`${btnSecondary} shrink-0 px-4 py-2 text-sm`}
-                  >
-                    중단
-                  </button>
-                </div>
-              </div>
-            )}
           </>
         ) : (
           /* Blog Result */
