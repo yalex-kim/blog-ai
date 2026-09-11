@@ -3,7 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { getSession } from '@/lib/session';
 import type { PostgrestError } from '@supabase/supabase-js';
 import { isDatabaseFault, logDatabaseFault } from '@/lib/db-errors';
-import { rowCost, toNumber } from '@/lib/usage-cost';
+import { rowCost } from '@/lib/usage-cost';
 
 // Spend for the signed-in tenant. Aggregated in this process rather than in
 // SQL: PostgREST has no GROUP BY, and the alternative is a database function

@@ -13,6 +13,7 @@ import { IMAGE_TYPES, resolveImageType } from '@/lib/verticals/types';
 import type { KeyStatus } from '@/lib/tenant-keys';
 import { saveDraft, readDraft, clearDraft, describeDraftAge } from '@/lib/drafts';
 import { calculateImageCost, formatUsd } from '@/lib/pricing';
+import { OnboardingChecklist, type OnboardingStep } from '@/components/OnboardingChecklist';
 
 /** Category name → topics. The keys come from the tenant's vertical pack. */
 type Topics = Record<string, string[]>;
@@ -111,6 +112,8 @@ export default function DashboardPage() {
   const [imageProgress, setImageProgress] = useState<{ done: number; total: number } | null>(null);
   // What the post on screen has cost so far, shown where the spending happened.
   const [postCost, setPostCost] = useState<PostCost | null>(null);
+  const [setupComplete, setSetupComplete] = useState<boolean | null>(null);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
   // Wall-clock for a running generation: the honest alternative to inventing
   // server-side progress the API does not report.
   const [elapsed, setElapsed] = useState(0);
@@ -122,6 +125,41 @@ export default function DashboardPage() {
 
   const { toasts, showToast, dismiss } = useToasts();
 
+  // Only assembled once the tenant record has loaded, so the checklist never
+  // flashes "nothing done" at someone who finished setup weeks ago.
+  const onboardingSteps: OnboardingStep[] | null =
+    setupComplete === null
+      ? null
+      : [
+          {
+            id: 'password',
+            label: '비밀번호 변경',
+            hint: '처음 받은 임시 비밀번호를 바꿔주세요.',
+            done: !mustChangePassword,
+            href: '/change-password',
+          },
+          {
+            id: 'profile',
+            label: `${pack.terminology.tenantNoun} 정보 입력`,
+            hint: '이름과 주소, 주요 진료/서비스를 채우면 글에 반영됩니다.',
+            done: setupComplete,
+            href: '/settings',
+          },
+          {
+            id: 'key',
+            label: 'API 키 등록',
+            hint: '본인 키로 생성 요금이 청구됩니다. 키가 없으면 생성할 수 없습니다.',
+            done: hasKey('anthropic'),
+            href: '/settings',
+          },
+          {
+            id: 'first-post',
+            label: '첫 글 생성',
+            hint: '아래에서 주제를 고르거나 직접 입력해 시작해보세요.',
+            done: savedPosts.length > 0,
+          },
+        ];
+
   const fetchTenantInfo = async () => {
     try {
       const response = await fetch('/api/tenant/settings');
@@ -131,6 +169,8 @@ export default function DashboardPage() {
         setCategory(data.tenant.category || '');
         setVertical(data.tenant.vertical ?? null);
         setKeyStatuses(data.apiKeys ?? []);
+        setSetupComplete(!!data.tenant.is_initial_setup_complete);
+        setMustChangePassword(!!data.tenant.must_change_password);
       } else if (response.status === 401) {
         router.push('/login');
       }
@@ -642,6 +682,10 @@ export default function DashboardPage() {
 
         {!blogResult ? (
           <>
+            {onboardingSteps && (
+              <OnboardingChecklist steps={onboardingSteps} onNavigate={(href) => router.push(href)} />
+            )}
+
             {/* Greeting */}
             <div className="bg-surface rounded-card shadow-card p-6 mb-6">
               <h2 className="text-xl font-semibold mb-2">
@@ -756,27 +800,37 @@ export default function DashboardPage() {
             )}
 
             {generatingBlog && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-surface rounded-lg p-8 max-w-sm">
-                  <div className="flex flex-col items-center">
-                    <svg className="animate-spin h-12 w-12 text-accent mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <p className="text-ink font-medium">블로그 글을 생성하고 있습니다</p>
-                    {/* Elapsed and a real expected range. The API reports no
-                        intermediate state, so inventing "now searching…"
-                        stages would be fiction — this shows what is actually
-                        known. */}
-                    <p className="mt-2 text-sm text-ink-soft tabular-nums">
+              /* Inline rather than a full-screen overlay: a 90-second block on
+                 the whole page stops the user reading their own saved posts,
+                 and told them nothing the page could not say in place. */
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-6 bg-surface rounded-card shadow-card p-6 border border-accent/30"
+              >
+                <div className="flex items-start gap-4">
+                  <svg
+                    aria-hidden="true"
+                    className="animate-spin h-6 w-6 shrink-0 text-accent mt-0.5"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <div className="min-w-0">
+                    <p className="text-ink font-medium">
+                      &ldquo;{currentTopic}&rdquo; 글을 생성하고 있습니다
+                    </p>
+                    <p className="mt-1 text-sm text-ink-soft tabular-nums">
                       {elapsed}초 경과 · 보통 30~90초 걸립니다
                     </p>
-                    {elapsed > 90 && (
-                      <p className="mt-2 text-xs text-ink-faint text-center max-w-[22rem]">
-                        자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도
-                        글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.
-                      </p>
-                    )}
+                    <p className="mt-2 text-xs text-ink-faint">
+                      {elapsed > 90
+                        ? '자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도 글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.'
+                        : '이 화면을 벗어나도 글은 저장됩니다.'}
+                    </p>
                   </div>
                 </div>
               </div>
