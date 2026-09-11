@@ -102,6 +102,7 @@ export default function DashboardPage() {
   const [postsTotal, setPostsTotal] = useState(0);
   const [postsHasMore, setPostsHasMore] = useState(false);
   const [loadingMorePosts, setLoadingMorePosts] = useState(false);
+  const [postsLoaded, setPostsLoaded] = useState(false);
   const [currentPostId, setCurrentPostId] = useState<string | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editedContent, setEditedContent] = useState('');
@@ -144,10 +145,13 @@ export default function DashboardPage() {
 
   const { toasts, showToast, dismiss } = useToasts();
 
-  // Only assembled once the tenant record has loaded, so the checklist never
-  // flashes "nothing done" at someone who finished setup weeks ago.
+  // Assembled only once BOTH fetches have landed. The tenant record and the
+  // post list arrive separately, and building this on the tenant record alone
+  // meant "첫 글 생성" read as unfinished for as long as the post list was in
+  // flight — so an established account saw a 3/4 checklist flash on every
+  // refresh and then vanish.
   const onboardingSteps: OnboardingStep[] | null =
-    setupComplete === null
+    setupComplete === null || !postsLoaded
       ? null
       : [
           {
@@ -213,6 +217,7 @@ export default function DashboardPage() {
 
       const response = await fetch(`/api/blog-posts?${params}`);
       if (!response.ok) return;
+      setPostsLoaded(true);
 
       const data = await response.json();
       setSavedPosts((current) =>
@@ -229,6 +234,10 @@ export default function DashboardPage() {
       }
     } catch (error) {
       console.error('Error fetching saved posts:', error);
+    } finally {
+      // Even on failure: withholding the checklist forever is worse than
+      // showing it against an empty list.
+      setPostsLoaded(true);
     }
   };
 
