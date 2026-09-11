@@ -192,6 +192,11 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {/* Above the profile form while a key is missing: without one nothing
+            on this product works, so it must not sit below a long form the
+            user has no reason to read yet. */}
+        <ApiKeySettings position="top" />
+
         <form onSubmit={handleSave} className="bg-surface rounded-card shadow-card p-8 space-y-6">
           <div>
             <label htmlFor="tenant-name" className="block text-sm font-medium text-ink mb-2">
@@ -399,7 +404,7 @@ export default function SettingsPage() {
           </button>
         </form>
 
-        <ApiKeySettings />
+        <ApiKeySettings position="bottom" />
       </main>
     </div>
   );

@@ -31,6 +31,39 @@ const IMAGE_MODELS: Record<string, string> = {
 
 export const maxDuration = 300; // 5 minutes for High quality generation
 
+// The platform kills the function at maxDuration with no response at all, so a
+// batch that runs right up to the edge loses even the images that finished.
+// Stop short of it and answer with what is done.
+//
+// Images are saved to Storage and blog_images as each one lands, so a timeout
+// is never total loss — but only if we get to say so. Past this deadline the
+// still-running generations keep going and keep saving; the client is told to
+// reload rather than being left with a dead request.
+//
+// ⚠ maxDuration is what THIS code asks for. The deployment's plan is what it
+// gets: Vercel's Hobby tier caps functions far lower, and there High quality
+// cannot finish at all. Set IMAGE_DEADLINE_MS below the real cap if the plan
+// allows less than 300s.
+const RESPONSE_MARGIN_MS = 20_000;
+const IMAGE_DEADLINE_MS =
+  Number(process.env.IMAGE_DEADLINE_MS) || maxDuration * 1000 - RESPONSE_MARGIN_MS;
+
+interface TimedOut {
+  timedOut: true;
+}
+
+/** Resolves with the promise's value, or a marker once the deadline passes. */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | TimedOut> {
+  return Promise.race([
+    promise,
+    new Promise<TimedOut>((resolve) => setTimeout(() => resolve({ timedOut: true }), ms)),
+  ]);
+}
+
+function isTimedOut(value: unknown): value is TimedOut {
+  return typeof value === 'object' && value !== null && 'timedOut' in value;
+}
+
 const VALID_IMAGE_TYPES: readonly ImageType[] = IMAGE_TYPES;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TEXT_LENGTH = 200;
@@ -366,11 +399,25 @@ export async function POST(request: NextRequest) {
       };
     });
 
-    const results = await Promise.allSettled(imagePromises);
+    // Deadline measured from here: the generation calls are what take the time.
+    const deadlineAt = Date.now() + IMAGE_DEADLINE_MS;
+    const results = await Promise.allSettled(
+      imagePromises.map((promise) =>
+        withDeadline(promise, Math.max(deadlineAt - Date.now(), 1_000))
+      )
+    );
+
+    const timedOutCount = results.filter(
+      (r) => r.status === 'fulfilled' && isTimedOut(r.value)
+    ).length;
 
     // One row for the batch, counting only the images the provider actually
-    // produced — a call that threw was not billed.
-    const generatedCount = results.filter((r) => r.status === 'fulfilled').length;
+    // produced — a call that threw was not billed. A timed-out one may still
+    // land and be billed; it is counted when the user reloads and the row for
+    // it is written by the request that finishes.
+    const generatedCount = results.filter(
+      (r) => r.status === 'fulfilled' && !isTimedOut(r.value)
+    ).length;
     if (generatedCount > 0) {
       await recordUsage({
         tenantId: sessionData.id,
@@ -386,20 +433,35 @@ export async function POST(request: NextRequest) {
 
     // A single failed image must not lose the ones that worked, so each
     // rejection becomes an error entry in its own slot.
-    const images = results.map((result, idx) =>
-      result.status === 'fulfilled'
-        ? result.value
-        : {
-            keyword: typeof keywords[idx] === 'string' ? keywords[idx] : keywords[idx]?.description ?? '',
-            text: '',
-            url: '',
-            prompt: '',
-            type: 'EXPLAINER',
-            error: '이미지 생성에 실패했습니다.',
-          }
-    );
+    const describeSlot = (idx: number) =>
+      typeof keywords[idx] === 'string' ? keywords[idx] : keywords[idx]?.description ?? '';
 
-    return NextResponse.json({ images });
+    const images = results.map((result, idx) => {
+      if (result.status === 'fulfilled' && !isTimedOut(result.value)) return result.value;
+
+      const stillRunning = result.status === 'fulfilled' && isTimedOut(result.value);
+      return {
+        keyword: describeSlot(idx),
+        text: '',
+        url: '',
+        prompt: '',
+        type: 'EXPLAINER',
+        error: stillRunning
+          ? '시간이 초과되었습니다. 생성은 계속 진행 중일 수 있으니 잠시 후 새로고침해주세요.'
+          : '이미지 생성에 실패했습니다.',
+      };
+    });
+
+    return NextResponse.json({
+      images,
+      ...(timedOutCount > 0
+        ? {
+            warning:
+              `${timedOutCount}장이 제한 시간 안에 끝나지 않았습니다. ` +
+              '품질을 낮추거나 장수를 줄이면 안정적으로 완료됩니다.',
+          }
+        : {}),
+    });
   } catch (error: unknown) {
     console.error('Error generating images:', error);
     const errorMessage = error instanceof Error ? error.message : '이미지 생성 중 오류가 발생했습니다.';

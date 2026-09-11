@@ -11,6 +11,7 @@ import { btnGhost, btnPrimary, btnSecondary } from '@/lib/ui';
 import { getVertical } from '@/lib/verticals/registry';
 import { IMAGE_TYPES, resolveImageType } from '@/lib/verticals/types';
 import type { KeyStatus } from '@/lib/tenant-keys';
+import { saveDraft, readDraft, clearDraft, describeDraftAge } from '@/lib/drafts';
 
 /** Category name → topics. The keys come from the tenant's vertical pack. */
 type Topics = Record<string, string[]>;
@@ -90,6 +91,10 @@ export default function DashboardPage() {
   const [keyStatuses, setKeyStatuses] = useState<KeyStatus[]>([]);
   const [apiKeyNotice, setApiKeyNotice] = useState<string | null>(null);
 
+  // Unsaved-edit safety net (draft) and the delete confirmation.
+  const [draftAge, setDraftAge] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
   const hasKey = (provider: string) =>
     keyStatuses.some((status) => status.provider === provider && status.configured);
   // Empty until the first fetch resolves; don't warn about a key we haven't looked up yet.
@@ -131,6 +136,32 @@ export default function DashboardPage() {
     fetchSavedPosts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Warn before losing work. Two cases: an edit that has not been saved, and a
+  // generation the user is paying for that would be abandoned mid-flight.
+  useEffect(() => {
+    const dirty = isEditMode && editedContent !== blogResult?.content;
+    if (!dirty && !generatingBlog && !generatingImages) return;
+
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Browsers show their own wording; returnValue just opts the page in.
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [isEditMode, editedContent, blogResult, generatingBlog, generatingImages]);
+
+  // Persist the edit locally as it is typed, so a closed tab or a crash costs
+  // nothing. Debounced — this runs on every keystroke otherwise.
+  useEffect(() => {
+    if (!isEditMode || !currentPostId) return;
+    if (editedContent === blogResult?.content) return;
+
+    const timer = setTimeout(() => saveDraft(currentPostId, editedContent), 800);
+    return () => clearTimeout(timer);
+  }, [isEditMode, editedContent, currentPostId, blogResult]);
 
   // Handle browser back button
   useEffect(() => {
@@ -187,6 +218,11 @@ export default function DashboardPage() {
     setEditedContent(post.content);
     setIsEditMode(false);
     setCopied(false);
+
+    // An unsaved edit from a previous visit. Offered, never applied silently —
+    // the user may have abandoned it deliberately.
+    const draft = readDraft(post.id);
+    setDraftAge(draft && draft.content !== post.content ? describeDraftAge(draft.savedAt) : null);
 
     // Initialize image prompts from suggestions
     setImagePrompts(imageSuggestions.length > 0 ? imageSuggestions : []);
@@ -286,6 +322,9 @@ export default function DashboardPage() {
         setBlogResult({ ...blogResult!, content: editedContent, imageSuggestions });
         setImagePrompts(imageSuggestions);
         setIsEditMode(false);
+        // The server now holds this text; the local safety net has done its job.
+        if (currentPostId) clearDraft(currentPostId);
+        setDraftAge(null);
         showToast('success', '저장되었습니다.');
         fetchSavedPosts();
       } else {
@@ -294,6 +333,50 @@ export default function DashboardPage() {
     } catch (error) {
       console.error('Error saving edit:', error);
       showToast('error', '저장 중 오류가 발생했습니다.');
+    }
+  };
+
+  const restoreDraft = () => {
+    if (!currentPostId) return;
+    const draft = readDraft(currentPostId);
+    if (!draft) return;
+    setEditedContent(draft.content);
+    setIsEditMode(true);
+    setDraftAge(null);
+    showToast('success', '수정하던 내용을 불러왔습니다. 확인 후 저장해주세요.');
+  };
+
+  const discardDraft = () => {
+    if (currentPostId) clearDraft(currentPostId);
+    setDraftAge(null);
+  };
+
+  const deletePost = async (id: string) => {
+    try {
+      const response = await fetch('/api/blog-posts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const data = await response.json();
+
+      if (response.ok) {
+        clearDraft(id);
+        // Leave the result view if the post being read is the one removed.
+        if (currentPostId === id) {
+          setBlogResult(null);
+          setCurrentPostId(null);
+          setGeneratedImages([]);
+          setImagePrompts([]);
+        }
+        setSavedPosts((current) => current.filter((post) => post.id !== id));
+        showToast('success', '글이 삭제되었습니다.');
+      } else {
+        showToast('error', data.error || '글 삭제에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('Error deleting post:', error);
+      showToast('error', '글 삭제 중 오류가 발생했습니다.');
     }
   };
 
@@ -330,6 +413,7 @@ export default function DashboardPage() {
       if (response.ok) {
         const data = await response.json();
         setGeneratedImages(data.images);
+        if (data.warning) showToast('error', data.warning);
         // Refresh saved posts to update with newly generated images
         fetchSavedPosts();
       } else {
@@ -578,21 +662,32 @@ export default function DashboardPage() {
                 <h3 className="text-lg font-semibold mb-4">저장된 글 (최근 10개)</h3>
                 <div className="space-y-2">
                   {savedPosts.map((post) => (
-                    <button
+                    <div
                       key={post.id}
-                      onClick={() => loadSavedPost(post)}
-                      className="w-full text-left px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
+                      className="flex items-start gap-2 px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
                     >
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h4 className="font-medium text-ink">{post.title}</h4>
-                          <p className="text-sm text-ink-faint mt-1">{post.topic}</p>
-                        </div>
-                        <span className="text-xs text-ink-faint ml-4">
+                      {/* The row and the delete control are siblings: a button
+                          cannot legally contain another button. */}
+                      <button
+                        onClick={() => loadSavedPost(post)}
+                        className="flex-1 min-w-0 text-left"
+                      >
+                        <h4 className="font-medium text-ink truncate">{post.title}</h4>
+                        <p className="text-sm text-ink-faint mt-1 truncate">{post.topic}</p>
+                      </button>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span className="text-xs text-ink-faint tabular-nums">
                           {new Date(post.created_at).toLocaleDateString('ko-KR')}
                         </span>
+                        <button
+                          onClick={() => setPendingDeleteId(post.id)}
+                          aria-label={`${post.title} 삭제`}
+                          className="rounded px-2 py-1 text-sm text-ink-faint hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        >
+                          삭제
+                        </button>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -617,6 +712,22 @@ export default function DashboardPage() {
           <div className="space-y-6 lg:space-y-0 lg:flex lg:flex-col lg:flex-1 lg:min-h-0 lg:gap-4">
             {/* Toolbar is pinned above both columns so it stays reachable
                 no matter how far either one is scrolled. */}
+            {draftAge && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-card px-5 py-4 flex items-center justify-between gap-4 flex-wrap">
+                <p className="text-sm text-yellow-900">
+                  저장하지 않은 수정본이 있습니다 ({draftAge} 작성).
+                </p>
+                <div className="flex gap-2 shrink-0">
+                  <button onClick={restoreDraft} className={`${btnPrimary} px-4 py-2 text-sm`}>
+                    이어서 수정
+                  </button>
+                  <button onClick={discardDraft} className={`${btnSecondary} px-4 py-2 text-sm`}>
+                    버리기
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-3">
               {currentPostId && (
                 <>
@@ -891,6 +1002,18 @@ export default function DashboardPage() {
         )}
       </main>
 
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="이 글을 삭제할까요?"
+        message="글과 함께 생성된 이미지도 모두 삭제됩니다. 되돌릴 수 없습니다."
+        confirmLabel="삭제"
+        onConfirm={() => {
+          const id = pendingDeleteId;
+          setPendingDeleteId(null);
+          if (id) void deletePost(id);
+        }}
+        onCancel={() => setPendingDeleteId(null)}
+      />
       <ConfirmDialog
         open={pendingRegenIndex !== null}
         title="이미지를 다시 생성할까요?"
