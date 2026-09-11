@@ -21,8 +21,7 @@ afterEach(() => {
 });
 
 describe('resolveApiKey', () => {
-  it("prefers the tenant's own key over the platform key", () => {
-    process.env.ANTHROPIC_API_KEY = 'platform-key-value';
+  it("returns the tenant's own key", () => {
     const tenant = { anthropic_api_key_encrypted: encryptApiKey('tenant-key-value') };
 
     expect(resolveApiKey('anthropic', tenant)).toEqual({
@@ -31,28 +30,26 @@ describe('resolveApiKey', () => {
     });
   });
 
-  it('falls back to the platform key so pre-BYOK accounts keep working', () => {
+  it('never falls back to a platform env var, even when one is set', () => {
+    // The whole point of dropping the fallback: an account with no key of its
+    // own must not generate on the operator's bill.
+    process.env.ANTHROPIC_API_KEY = 'platform-key-value';
     process.env.OPENAI_API_KEY = 'platform-key-value';
+    process.env.GEMINI_API_KEY = 'platform-key-value';
 
-    expect(resolveApiKey('openai', {})).toEqual({
-      apiKey: 'platform-key-value',
-      source: 'platform',
-    });
+    expect(resolveApiKey('anthropic', {})).toBeNull();
+    expect(resolveApiKey('openai', {})).toBeNull();
+    expect(resolveApiKey('gemini', {})).toBeNull();
   });
 
-  it('returns null when neither side has a key, rather than an empty string', () => {
+  it('returns null when there is no key, rather than an empty string', () => {
     expect(resolveApiKey('gemini', {})).toBeNull();
     expect(resolveApiKey('gemini', null)).toBeNull();
   });
 
-  it('falls back rather than throwing when the stored key cannot be decrypted', () => {
-    process.env.ANTHROPIC_API_KEY = 'platform-key-value';
+  it('returns null rather than throwing when the stored key cannot be decrypted', () => {
     const tenant = { anthropic_api_key_encrypted: 'not:valid:ciphertext' };
-
-    expect(resolveApiKey('anthropic', tenant)).toEqual({
-      apiKey: 'platform-key-value',
-      source: 'platform',
-    });
+    expect(resolveApiKey('anthropic', tenant)).toBeNull();
   });
 
   it('keeps each provider on its own column', () => {
@@ -113,23 +110,15 @@ describe('describeKeyStatus', () => {
 
     expect(status.configured).toBe(true);
     expect(status.hint).toBe('••••••••1234');
-    expect(status.usingPlatformKey).toBe(false);
     expect(JSON.stringify(status)).not.toContain('sk-ant-secret-value-1234');
   });
 
-  it('flags a provider that is silently running on the platform key', () => {
+  it('reports an unset provider as unconfigured even with a platform env var set', () => {
     process.env.OPENAI_API_KEY = 'platform-key-value';
     const status = describeKeyStatus('openai', {});
 
     expect(status.configured).toBe(false);
     expect(status.hint).toBeNull();
-    expect(status.usingPlatformKey).toBe(true);
-  });
-
-  it('flags a provider that has no key at all', () => {
-    const status = describeKeyStatus('gemini', {});
-    expect(status.configured).toBe(false);
-    expect(status.usingPlatformKey).toBe(false);
   });
 
   it('describes all three providers', () => {

@@ -25,6 +25,9 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'main_services', 'address', 'trusted_domains', 'blog_platform', 'blog_id',
     'blog_password_encrypted', 'blog_board_name', 'must_change_password',
     'is_initial_setup_complete', 'created_at',
+    // Added by 002; without them BYOK silently degrades rather than erroring.
+    'anthropic_api_key_encrypted', 'openai_api_key_encrypted',
+    'gemini_api_key_encrypted',
   ],
   blog_posts: [
     'id', 'tenant_id', 'title', 'content', 'topic', 'keywords',
@@ -34,7 +37,41 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'id', 'blog_post_id', 'keyword', 'text_content', 'image_type', 'prompt_id',
     'display_order', 'storage_path', 'public_url', 'prompt', 'created_at',
   ],
+  usage_events: [
+    'id', 'tenant_id', 'kind', 'provider', 'model', 'key_source', 'blog_post_id',
+    'input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+    'cache_read_input_tokens', 'web_search_requests', 'image_count',
+    'image_quality', 'cost_usd', 'created_at',
+  ],
 };
+
+// Which file creates each table, so the report names the fix rather than
+// sending everyone to schema.sql regardless of what is actually missing.
+const TABLE_SOURCE: Record<string, string> = {
+  admins: 'database/schema.sql',
+  tenants: 'database/schema.sql',
+  blog_posts: 'database/schema.sql',
+  blog_images: 'database/schema.sql',
+  usage_events: 'database/002_byok_and_usage.sql',
+};
+
+// Columns a later migration adds, keyed `table.column`. Anything not listed
+// came with schema.sql, so its absence is drift that 001 repairs.
+const DEFAULT_COLUMN_SOURCE = 'database/001_repair_schema.sql';
+
+const COLUMN_SOURCE: Record<string, string> = {
+  'tenants.anthropic_api_key_encrypted': 'database/002_byok_and_usage.sql',
+  'tenants.openai_api_key_encrypted': 'database/002_byok_and_usage.sql',
+  'tenants.gemini_api_key_encrypted': 'database/002_byok_and_usage.sql',
+};
+
+function columnSource(table: string, column: string): string {
+  // A column of a table that a migration created belongs to that migration.
+  return (
+    COLUMN_SOURCE[`${table}.${column}`] ??
+    (TABLE_SOURCE[table] !== 'database/schema.sql' ? TABLE_SOURCE[table] : DEFAULT_COLUMN_SOURCE)
+  );
+}
 
 // A client built here rather than imported from lib/supabase: that module
 // calls createClient at import time and throws when the env vars are missing,
@@ -130,17 +167,15 @@ export async function GET(request: NextRequest) {
     SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
     SESSION_SECRET: !!process.env.SESSION_SECRET,
     BLOG_CREDENTIAL_ENCRYPTION_KEY: !!process.env.BLOG_CREDENTIAL_ENCRYPTION_KEY,
-    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
-    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
   };
+  // Provider keys are deliberately absent: they are per-tenant now, and a
+  // deployment-wide one would not be used even if it were set.
 
   const problems: string[] = [];
   for (const [name, present] of Object.entries(env)) {
-    // The image keys are optional per provider, and BYOK means a tenant can
-    // supply the model keys themselves — only the first four are load-bearing.
-    const required = ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SESSION_SECRET', 'BLOG_CREDENTIAL_ENCRYPTION_KEY'];
-    if (required.includes(name) && !present) {
+    // Every one of these is load-bearing; the anon key only for client-side
+    // Supabase use, which this app does not currently do.
+    if (name !== 'NEXT_PUBLIC_SUPABASE_ANON_KEY' && !present) {
       problems.push(`환경변수 ${name} 가 설정되어 있지 않습니다.`);
     }
   }
@@ -193,11 +228,22 @@ export async function GET(request: NextRequest) {
 
       for (const [table, report] of entries) {
         if (!report.exists) {
-          problems.push(`테이블 ${table} 이(가) 없습니다. database/schema.sql 을 실행하세요.`);
-        } else if (report.missingColumns.length > 0) {
           problems.push(
-            `테이블 ${table} 에 컬럼이 없습니다: ${report.missingColumns.join(', ')} — database/001_repair_schema.sql 을 실행하세요.`
+            `테이블 ${table} 이(가) 없습니다. ${TABLE_SOURCE[table] ?? 'database/schema.sql'} 을 실행하세요.`
           );
+        } else if (report.missingColumns.length > 0) {
+          // Group by the file that adds them: one table can be missing columns
+          // from two different migrations at once.
+          const bySource = new Map<string, string[]>();
+          for (const column of report.missingColumns) {
+            const source = columnSource(table, column);
+            bySource.set(source, [...(bySource.get(source) ?? []), column]);
+          }
+          for (const [source, columns] of bySource) {
+            problems.push(
+              `테이블 ${table} 에 컬럼이 없습니다: ${columns.join(', ')} — ${source} 을 실행하세요.`
+            );
+          }
         } else if (report.error) {
           problems.push(`테이블 ${table} 조회 실패: ${report.error}`);
         }

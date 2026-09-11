@@ -6,7 +6,7 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
 import { getVertical } from '@/lib/verticals/registry';
 import { buildTopicPrompt } from '@/lib/verticals/build-blog-prompt';
-import { resolveApiKey, missingKeyMessage } from '@/lib/tenant-keys';
+import { resolveApiKey, missingKeyMessage, MISSING_API_KEY_CODE } from '@/lib/tenant-keys';
 import { recordUsage, extractAnthropicUsage } from '@/lib/usage';
 
 const TOPIC_MODEL = 'claude-sonnet-5';
@@ -48,7 +48,10 @@ export async function POST(request: NextRequest) {
     // BYOK — the select above is `*`, so the encrypted key column is already here.
     const anthropicKey = resolveApiKey('anthropic', tenant);
     if (!anthropicKey) {
-      return NextResponse.json({ error: missingKeyMessage('anthropic') }, { status: 400 });
+      return NextResponse.json(
+        { error: missingKeyMessage('anthropic'), code: MISSING_API_KEY_CODE, provider: 'anthropic' },
+        { status: 400 }
+      );
     }
 
     const anthropic = new Anthropic({ apiKey: anthropicKey.apiKey });

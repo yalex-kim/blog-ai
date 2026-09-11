@@ -8,7 +8,6 @@ interface KeyStatus {
   label: string;
   configured: boolean;
   hint: string | null;
-  usingPlatformKey: boolean;
 }
 
 const PROVIDER_HELP: Record<KeyStatus['provider'], { where: string; url: string }> = {
@@ -98,8 +97,9 @@ export default function ApiKeySettings() {
     <section className="mt-8 bg-surface rounded-card shadow-card p-8">
       <h2 className="text-xl font-bold text-ink mb-1">API 키</h2>
       <p className="text-sm text-ink-soft mb-6">
-        직접 발급받은 키를 등록하면 글과 이미지 생성 요금이 해당 키로 청구됩니다.
-        키는 암호화되어 저장되며, 저장 후에는 마지막 4자리만 확인할 수 있습니다.
+        글과 이미지 생성에는 본인이 발급받은 API 키가 필요합니다. 키를 등록해야
+        생성 기능을 사용할 수 있고, 요금은 등록한 키로 직접 청구됩니다. 키는
+        암호화되어 저장되며, 저장 후에는 마지막 4자리만 확인할 수 있습니다.
       </p>
 
       {success && (
@@ -129,10 +129,6 @@ export default function ApiKeySettings() {
                 {status.configured ? (
                   <span className="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">
                     등록됨 · {status.hint}
-                  </span>
-                ) : status.usingPlatformKey ? (
-                  <span className="text-xs px-2 py-1 rounded-full bg-yellow-50 text-yellow-800 border border-yellow-200">
-                    미등록 · 공용 키 사용 중
                   </span>
                 ) : (
                   <span className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700 border border-red-200">

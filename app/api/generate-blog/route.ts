@@ -14,7 +14,12 @@ import {
   buildBlogUserMessage,
 } from '@/lib/verticals/build-blog-prompt';
 import { isTrustedOrigin } from '@/lib/request-security';
-import { resolveApiKey, missingKeyMessage, KEY_COLUMNS } from '@/lib/tenant-keys';
+import {
+  resolveApiKey,
+  missingKeyMessage,
+  KEY_COLUMNS,
+  MISSING_API_KEY_CODE,
+} from '@/lib/tenant-keys';
 import { recordUsage, extractAnthropicUsage } from '@/lib/usage';
 
 const BLOG_MODEL = 'claude-sonnet-4-5-20250929';
@@ -81,11 +86,13 @@ export async function POST(request: NextRequest) {
       .eq('id', sessionData.id)
       .single();
 
-    // BYOK: the tenant's key pays for this call. Falls back to the platform key
-    // only if the deployment still sets one.
+    // BYOK: the tenant's own key pays for this call, and there is no fallback.
     const key = resolveApiKey('anthropic', tenant);
     if (!key) {
-      return NextResponse.json({ error: missingKeyMessage('anthropic') }, { status: 400 });
+      return NextResponse.json(
+        { error: missingKeyMessage('anthropic'), code: MISSING_API_KEY_CODE, provider: 'anthropic' },
+        { status: 400 }
+      );
     }
 
     const anthropic = new Anthropic({ apiKey: key.apiKey });

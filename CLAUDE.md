@@ -122,11 +122,8 @@ SESSION_SECRET=                  # signs session cookies (openssl rand -base64 4
 BLOG_CREDENTIAL_ENCRYPTION_KEY=  # encrypts tenants' blog platform passwords at rest
 IMAGE_PROVIDER=openai            # fallback only; the dashboard picks per request
 
-# Model provider keys. Optional under BYOK: they are the *fallback* for tenants
-# who have not entered their own. Leave them unset for strict BYOK.
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
-GEMINI_API_KEY=
+# There are no deployment-wide model provider keys. Every call is paid for by
+# the tenant's own key, entered in settings — see BYOK below.
 
 # Optional. Per-image cost overrides for the usage dashboard — both providers
 # have built-in rates, so these are only needed when a published price changes.
@@ -148,10 +145,21 @@ that need them throw at request time if unset.
 A tenant stores their own Anthropic/OpenAI/Gemini keys, encrypted at rest with
 `BLOG_CREDENTIAL_ENCRYPTION_KEY` (AES-256-GCM, same envelope as the blog
 password — see `lib/secret-crypto.ts`). `resolveApiKey()` in
-`lib/tenant-keys.ts` is the single resolution point: **the tenant's key wins,
-the platform env var is the fallback, and null means the request is refused
-with a message telling them to add one.** That fallback is what makes BYOK a
-migration rather than a breaking change; unset the env vars to enforce BYOK.
+`lib/tenant-keys.ts` is the single resolution point, and it is **strict: the
+tenant's own key or nothing.** There is no environment fallback — a
+deployment-wide key would let an account generate without ever entering one,
+billing the operator silently, and would remove any reason to supply theirs.
+
+Without a key the route answers `400` with
+`{ error, code: 'MISSING_API_KEY', provider }`. The dashboard renders that as a
+persistent banner with a link to settings, not a toast — a four-second toast
+cannot carry the action. It also reads key status on load and warns before a
+click is wasted.
+
+Giving an account allowance on a platform key is planned as an **admin decision
+tied to a plan**, not a silent default; when it lands it belongs behind an
+explicit per-tenant grant, not behind `process.env`. `KeySource` and
+`usage_events.key_source` already carry the distinction.
 
 Keys are write-only. They are never returned to a client — the settings UI gets
 `{configured, hint: '••••••••1234'}` from `describeKeyStatus()`. In

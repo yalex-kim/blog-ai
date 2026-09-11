@@ -13,7 +13,12 @@ import { getImageProvider, resolveImageProviderId } from '@/lib/image-providers'
 import { getSession } from '@/lib/session';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
-import { resolveApiKey, missingKeyMessage, KEY_COLUMNS } from '@/lib/tenant-keys';
+import {
+  resolveApiKey,
+  missingKeyMessage,
+  KEY_COLUMNS,
+  MISSING_API_KEY_CODE,
+} from '@/lib/tenant-keys';
 import { recordUsage } from '@/lib/usage';
 import { normalizeImageQuality, DEFAULT_IMAGE_QUALITY } from '@/lib/pricing';
 
@@ -133,7 +138,10 @@ export async function POST(request: NextRequest) {
     const providerId = resolveImageProviderId(providerOverride);
     const imageKey = resolveApiKey(providerId, tenant);
     if (!imageKey) {
-      return NextResponse.json({ error: missingKeyMessage(providerId) }, { status: 400 });
+      return NextResponse.json(
+        { error: missingKeyMessage(providerId), code: MISSING_API_KEY_CODE, provider: providerId },
+        { status: 400 }
+      );
     }
 
     const imageProvider = getImageProvider(providerId, imageKey.apiKey);

@@ -10,6 +10,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { btnGhost, btnPrimary, btnSecondary } from '@/lib/ui';
 import { getVertical } from '@/lib/verticals/registry';
 import { IMAGE_TYPES, resolveImageType } from '@/lib/verticals/types';
+import type { KeyStatus } from '@/lib/tenant-keys';
 
 /** Category name → topics. The keys come from the tenant's vertical pack. */
 type Topics = Record<string, string[]>;
@@ -83,6 +84,17 @@ export default function DashboardPage() {
   const [copied, setCopied] = useState(false);
   const [pendingRegenIndex, setPendingRegenIndex] = useState<number | null>(null);
 
+  // Which providers the tenant has a key for. Generation is refused without
+  // one, so this is read up front to warn before a click is wasted rather than
+  // only after the request comes back 400.
+  const [keyStatuses, setKeyStatuses] = useState<KeyStatus[]>([]);
+  const [apiKeyNotice, setApiKeyNotice] = useState<string | null>(null);
+
+  const hasKey = (provider: string) =>
+    keyStatuses.some((status) => status.provider === provider && status.configured);
+  // Empty until the first fetch resolves; don't warn about a key we haven't looked up yet.
+  const keysLoaded = keyStatuses.length > 0;
+
   const { toasts, showToast, dismiss } = useToasts();
 
   const fetchTenantInfo = async () => {
@@ -93,6 +105,7 @@ export default function DashboardPage() {
         setTenantName(data.tenant.name || '');
         setCategory(data.tenant.category || '');
         setVertical(data.tenant.vertical ?? null);
+        setKeyStatuses(data.apiKeys ?? []);
       } else if (response.status === 401) {
         router.push('/login');
       }
@@ -235,7 +248,14 @@ export default function DashboardPage() {
       } else {
         const errorData = await response.json();
         console.error('Error response:', errorData);
-        showToast('error', errorData.error || '블로그 생성에 실패했습니다.');
+        if (errorData.code === 'MISSING_API_KEY') {
+          // A 4-second toast cannot carry the "go to settings" action, so the
+          // missing-key case gets the persistent banner instead.
+          setApiKeyNotice(errorData.error);
+          fetchTenantInfo();
+        } else {
+          showToast('error', errorData.error || '블로그 생성에 실패했습니다.');
+        }
       }
     } catch (error) {
       console.error('Error generating blog:', error);
@@ -315,7 +335,12 @@ export default function DashboardPage() {
       } else {
         const errorData = await response.json();
         console.error('Error response:', errorData);
-        showToast('error', `이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
+        if (errorData.code === 'MISSING_API_KEY') {
+          setApiKeyNotice(errorData.error);
+          fetchTenantInfo();
+        } else {
+          showToast('error', `이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
+        }
       }
     } catch (error) {
       console.error('Error generating images:', error);
@@ -369,7 +394,12 @@ export default function DashboardPage() {
       } else {
         const errorData = await response.json();
         console.error('Error response:', errorData);
-        showToast('error', `이미지 재생성에 실패했습니다. ${errorData.error || ''}`.trim());
+        if (errorData.code === 'MISSING_API_KEY') {
+          setApiKeyNotice(errorData.error);
+          fetchTenantInfo();
+        } else {
+          showToast('error', `이미지 재생성에 실패했습니다. ${errorData.error || ''}`.trim());
+        }
       }
     } catch (error) {
       console.error('Error regenerating image:', error);
@@ -446,6 +476,24 @@ export default function DashboardPage() {
             : 'max-w-6xl py-8'
         }`}
       >
+        {(apiKeyNotice || (keysLoaded && !hasKey('anthropic'))) && (
+          <div className="mb-6 bg-yellow-50 border border-yellow-200 rounded-card px-5 py-4 flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <p className="font-semibold text-yellow-900 mb-1">API 키가 필요합니다</p>
+              <p className="text-sm text-yellow-800">
+                {apiKeyNotice ??
+                  '글을 생성하려면 본인의 Anthropic API 키를 등록해야 합니다. 생성 요금은 등록한 키로 청구됩니다.'}
+              </p>
+            </div>
+            <button
+              onClick={() => router.push('/settings')}
+              className={`${btnPrimary} px-4 py-2 text-sm whitespace-nowrap`}
+            >
+              키 등록하러 가기
+            </button>
+          </div>
+        )}
+
         {!blogResult ? (
           <>
             {/* Greeting */}
