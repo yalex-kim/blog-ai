@@ -22,10 +22,29 @@ need to keep working, give blog-ai its own Supabase project.
 
 Take a backup first. The script is safe to re-run.
 
+## An existing database that is behind the code
+
+Run `001_repair_schema.sql`. It `ALTER`s every table into the current shape and
+is safe to re-run.
+
+You need it because `schema.sql` is written with `CREATE TABLE IF NOT EXISTS`.
+That is right for a fresh project and does nothing for an existing one: once a
+table exists the whole `CREATE` is skipped, so a column added to `schema.sql`
+after you first ran it never reaches your database. **Re-running `schema.sql`
+does not repair drift.**
+
+The drift is not cosmetic. The admin login route filters on `admins.is_active`
+before it checks anything else, so against a table missing that column
+PostgREST fails the query, the route reads that as "no such admin", and a
+correct password comes back as `401` — identical to a wrong one.
+
+`GET /api/health` reports exactly which columns are missing, without needing a
+login. Set `HEALTH_CHECK_TOKEN` to require `?token=…` on it.
+
 ## Migrations
 
-There is no numbered migration chain yet. When the first schema change lands,
-add `001_*.sql` here and keep `schema.sql` as the current full picture.
+`001_repair_schema.sql` is the first. Keep `schema.sql` as the current full
+picture and add `002_*.sql` and so on beside it.
 
 ## First admin account
 

@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { createTenantSessionToken, SESSION_COOKIE_MAX_AGE_SECONDS } from '@/lib/session';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 import { isTrustedOrigin } from '@/lib/request-security';
+import { isDatabaseFault, logDatabaseFault } from '@/lib/db-errors';
 
 export async function POST(request: NextRequest) {
   try {
@@ -39,7 +40,16 @@ export async function POST(request: NextRequest) {
       .eq('login_id', login_id)
       .single();
 
-    if (error || !tenant) {
+    // Same reasoning as the admin route: only "no rows" means bad credentials.
+    if (isDatabaseFault(error)) {
+      logDatabaseFault('tenant-login', error!);
+      return NextResponse.json(
+        { error: '서버 설정 문제로 로그인할 수 없습니다. 관리자에게 문의해주세요.', code: 'DB_ERROR' },
+        { status: 500 }
+      );
+    }
+
+    if (!tenant) {
       return NextResponse.json(
         { error: '로그인 ID 또는 비밀번호가 올바르지 않습니다.' },
         { status: 401 }
