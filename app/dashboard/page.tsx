@@ -1,9 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { parseImageSuggestions } from '@/lib/parse-image-suggestions';
+import {
+  parseImageSuggestions,
+  toEditableContent,
+  fromEditableContent,
+} from '@/lib/parse-image-suggestions';
 import { ArticleBody } from '@/components/ArticleBody';
 import { ToastViewport, useToasts } from '@/components/Toast';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -11,6 +15,9 @@ import { btnGhost, btnPrimary, btnSecondary } from '@/lib/ui';
 import { getVertical } from '@/lib/verticals/registry';
 import { IMAGE_TYPES, resolveImageType } from '@/lib/verticals/types';
 import type { KeyStatus } from '@/lib/tenant-keys';
+import { saveDraft, readDraft, clearDraft, describeDraftAge } from '@/lib/drafts';
+import { calculateImageCost, formatUsd } from '@/lib/pricing';
+import { OnboardingChecklist, type OnboardingStep } from '@/components/OnboardingChecklist';
 
 /** Category name → topics. The keys come from the tenant's vertical pack. */
 type Topics = Record<string, string[]>;
@@ -31,9 +38,11 @@ interface BlogResult {
 interface GeneratedImage {
   keyword: string;
   text?: string;
+  /** Empty when the slot failed — check before rendering, never pass to <Image>. */
   url: string;
   prompt: string;
   type?: string;
+  error?: string;
 }
 
 interface EditableImagePrompt {
@@ -43,6 +52,13 @@ interface EditableImagePrompt {
   text: string;
 }
 
+interface PostCost {
+  totalUsd: number | null;
+  textUsd: number;
+  imageUsd: number;
+  unpricedEvents: number;
+}
+
 interface SavedPost {
   id: string;
   title: string;
@@ -50,6 +66,12 @@ interface SavedPost {
   content: string;
   image_keywords: string[];
   created_at: string;
+  posted_to_blog?: boolean;
+  /** From the list endpoint — counts, not the images themselves. */
+  imageCount?: number;
+  expectedImages?: number;
+  cost?: PostCost;
+  /** Only present on the single-post fetch. */
   images?: GeneratedImage[];
 }
 
@@ -78,6 +100,11 @@ export default function DashboardPage() {
 
   // New states for saved posts
   const [savedPosts, setSavedPosts] = useState<SavedPost[]>([]);
+  const [postSearch, setPostSearch] = useState('');
+  const [postsTotal, setPostsTotal] = useState(0);
+  const [postsHasMore, setPostsHasMore] = useState(false);
+  const [loadingMorePosts, setLoadingMorePosts] = useState(false);
+  const [postsLoaded, setPostsLoaded] = useState(false);
   const [currentPostId, setCurrentPostId] = useState<string | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editedContent, setEditedContent] = useState('');
@@ -90,12 +117,73 @@ export default function DashboardPage() {
   const [keyStatuses, setKeyStatuses] = useState<KeyStatus[]>([]);
   const [apiKeyNotice, setApiKeyNotice] = useState<string | null>(null);
 
+  // Unsaved-edit safety net (draft) and the delete confirmation.
+  const [draftAge, setDraftAge] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [imageProgress, setImageProgress] = useState<{ done: number; total: number } | null>(null);
+  // What the post on screen has cost so far, shown where the spending happened.
+  const [postCost, setPostCost] = useState<PostCost | null>(null);
+  const [setupComplete, setSetupComplete] = useState<boolean | null>(null);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  // Wall-clock for a running generation: the honest alternative to inventing
+  // server-side progress the API does not report.
+  const [elapsed, setElapsed] = useState(0);
+  // Lets the user abandon a generation they already know is wrong. The
+  // provider call is still billed once it has started — the saving is the
+  // minutes, not the money, and the UI says so.
+  const blogAbortRef = useRef<AbortController | null>(null);
+  // Guards against double-submission. These are refs, not state, on purpose:
+  // state updates are asynchronous, so a second click can be handled before
+  // the re-render that would have disabled the control. A ref flips now.
+  const generatingBlogRef = useRef(false);
+  const inFlightImageIndices = useRef<Set<number>>(new Set());
+  // Mobile splits the result into two panes; the desktop layout shows both.
+  const [mobilePane, setMobilePane] = useState<'article' | 'images'>('article');
+
   const hasKey = (provider: string) =>
     keyStatuses.some((status) => status.provider === provider && status.configured);
   // Empty until the first fetch resolves; don't warn about a key we haven't looked up yet.
   const keysLoaded = keyStatuses.length > 0;
 
   const { toasts, showToast, dismiss } = useToasts();
+
+  // Assembled only once BOTH fetches have landed. The tenant record and the
+  // post list arrive separately, and building this on the tenant record alone
+  // meant "첫 글 생성" read as unfinished for as long as the post list was in
+  // flight — so an established account saw a 3/4 checklist flash on every
+  // refresh and then vanish.
+  const onboardingSteps: OnboardingStep[] | null =
+    setupComplete === null || !postsLoaded
+      ? null
+      : [
+          {
+            id: 'password',
+            label: '비밀번호 변경',
+            hint: '처음 받은 임시 비밀번호를 바꿔주세요.',
+            done: !mustChangePassword,
+            href: '/change-password',
+          },
+          {
+            id: 'profile',
+            label: `${pack.terminology.tenantNoun} 정보 입력`,
+            hint: '이름과 주소, 주요 진료/서비스를 채우면 글에 반영됩니다.',
+            done: setupComplete,
+            href: '/settings',
+          },
+          {
+            id: 'key',
+            label: 'API 키 등록',
+            hint: '본인 키로 생성 요금이 청구됩니다. 키가 없으면 생성할 수 없습니다.',
+            done: hasKey('anthropic'),
+            href: '/settings',
+          },
+          {
+            id: 'first-post',
+            label: '첫 글 생성',
+            hint: '아래에서 주제를 고르거나 직접 입력해 시작해보세요.',
+            done: savedPosts.length > 0,
+          },
+        ];
 
   const fetchTenantInfo = async () => {
     try {
@@ -106,6 +194,8 @@ export default function DashboardPage() {
         setCategory(data.tenant.category || '');
         setVertical(data.tenant.vertical ?? null);
         setKeyStatuses(data.apiKeys ?? []);
+        setSetupComplete(!!data.tenant.is_initial_setup_complete);
+        setMustChangePassword(!!data.tenant.must_change_password);
       } else if (response.status === 401) {
         router.push('/login');
       }
@@ -114,15 +204,51 @@ export default function DashboardPage() {
     }
   };
 
-  const fetchSavedPosts = async () => {
+  /**
+   * `append` distinguishes "load the next page" from every other refresh —
+   * after generating or deleting, the list must reset to the first page rather
+   * than stack another copy of it onto what is already there.
+   */
+  const fetchSavedPosts = async (options?: { search?: string; offset?: number; append?: boolean }) => {
+    const search = options?.search ?? postSearch;
+    const offset = options?.offset ?? 0;
+
     try {
-      const response = await fetch('/api/blog-posts');
-      if (response.ok) {
-        const data = await response.json();
-        setSavedPosts(data.posts);
+      const params = new URLSearchParams({ offset: String(offset) });
+      if (search.trim()) params.set('q', search.trim());
+
+      const response = await fetch(`/api/blog-posts?${params}`);
+      if (!response.ok) return;
+      setPostsLoaded(true);
+
+      const data = await response.json();
+      setSavedPosts((current) =>
+        options?.append ? [...current, ...data.posts] : data.posts
+      );
+      setPostsTotal(data.total ?? 0);
+      setPostsHasMore(!!data.hasMore);
+
+      // Generation just changed what the open post has cost; the list already
+      // carries the new figure, so reuse it rather than re-querying.
+      if (currentPostId) {
+        const current = (data.posts as SavedPost[]).find((post) => post.id === currentPostId);
+        if (current?.cost) setPostCost(current.cost);
       }
     } catch (error) {
       console.error('Error fetching saved posts:', error);
+    } finally {
+      // Even on failure: withholding the checklist forever is worse than
+      // showing it against an empty list.
+      setPostsLoaded(true);
+    }
+  };
+
+  const loadMorePosts = async () => {
+    setLoadingMorePosts(true);
+    try {
+      await fetchSavedPosts({ offset: savedPosts.length, append: true });
+    } finally {
+      setLoadingMorePosts(false);
     }
   };
 
@@ -131,6 +257,46 @@ export default function DashboardPage() {
     fetchSavedPosts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Warn before losing work. Two cases: an edit that has not been saved, and a
+  // generation the user is paying for that would be abandoned mid-flight.
+  useEffect(() => {
+    const dirty =
+      isEditMode && editedContent !== toEditableContent(blogResult?.content ?? '');
+    if (!dirty && !generatingBlog && !generatingImages) return;
+
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Browsers show their own wording; returnValue just opts the page in.
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [isEditMode, editedContent, blogResult, generatingBlog, generatingImages]);
+
+  // Persist the edit locally as it is typed, so a closed tab or a crash costs
+  // nothing. Debounced — this runs on every keystroke otherwise.
+  useEffect(() => {
+    if (!isEditMode || !currentPostId) return;
+    if (editedContent === toEditableContent(blogResult?.content ?? '')) return;
+
+    // Stored as the editor sees it (placeholders); restoring puts the user
+    // back in edit mode, where that is the right representation.
+    const timer = setTimeout(() => saveDraft(currentPostId, editedContent), 800);
+    return () => clearTimeout(timer);
+  }, [isEditMode, editedContent, currentPostId, blogResult]);
+
+  // Tick while anything is generating, so a long wait shows movement.
+  useEffect(() => {
+    if (!generatingBlog && !generatingImages) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [generatingBlog, generatingImages]);
 
   // Handle browser back button
   useEffect(() => {
@@ -141,12 +307,17 @@ export default function DashboardPage() {
       setCurrentTopic('');
       setCurrentPostId(null);
       setIsEditMode(false);
+      setPostCost(null);
+      setDraftAge(null);
       // Refresh saved posts to show newly created content
       fetchSavedPosts();
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
+    // Bound once on mount: the handler clears the view, so the only thing it
+    // reads from a later render is the post list fetch, which is idempotent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fetchTopicRecommendations = async () => {
@@ -164,7 +335,24 @@ export default function DashboardPage() {
     }
   };
 
-  const loadSavedPost = (post: SavedPost) => {
+  const loadSavedPost = async (listPost: SavedPost) => {
+    // The list carries no images — it is a list of titles. Fetch the full post.
+    let post = listPost;
+    try {
+      const response = await fetch(`/api/blog-posts?id=${encodeURIComponent(listPost.id)}`);
+      if (response.ok) {
+        const data = await response.json();
+        post = { ...listPost, ...data.post };
+      }
+    } catch (error) {
+      console.error('Error loading post:', error);
+    }
+
+    setPostCost(listPost.cost ?? null);
+    loadPostIntoView(post);
+  };
+
+  const loadPostIntoView = (post: SavedPost) => {
     console.log('Loading saved post:', post);
     console.log('Image keywords:', post.image_keywords);
     console.log('Saved images:', post.images);
@@ -187,6 +375,15 @@ export default function DashboardPage() {
     setEditedContent(post.content);
     setIsEditMode(false);
     setCopied(false);
+
+    // An unsaved edit from a previous visit. Offered, never applied silently —
+    // the user may have abandoned it deliberately.
+    const draft = readDraft(post.id);
+    setDraftAge(
+      draft && draft.content !== toEditableContent(post.content)
+        ? describeDraftAge(draft.savedAt)
+        : null
+    );
 
     // Initialize image prompts from suggestions
     setImagePrompts(imageSuggestions.length > 0 ? imageSuggestions : []);
@@ -214,7 +411,18 @@ export default function DashboardPage() {
   };
 
   const generateBlog = async (topic: string) => {
+    // Every caller funnels through here, so one guard covers the recommendation
+    // buttons, the custom-topic button and the Enter key. Each extra call was a
+    // separate article saved and a separate charge on the tenant's own key, with
+    // the responses overwriting each other as they landed.
+    if (generatingBlogRef.current) return;
+    generatingBlogRef.current = true;
+
     setGeneratingBlog(true);
+    // The topic that starts a generation is usually a recommendation halfway
+    // down the page, and the progress card is at the top. Without this the
+    // click looks like it did nothing at all.
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     setBlogResult(null);
     setGeneratedImages([]);
     setCurrentTopic(topic);
@@ -222,11 +430,15 @@ export default function DashboardPage() {
     setIsEditMode(false);
     setCopied(false);
 
+    const controller = new AbortController();
+    blogAbortRef.current = controller;
+
     try {
       const response = await fetch('/api/generate-blog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic }),
+        signal: controller.signal,
       });
 
       if (response.ok) {
@@ -258,34 +470,53 @@ export default function DashboardPage() {
         }
       }
     } catch (error) {
-      console.error('Error generating blog:', error);
-      showToast('error', '블로그 생성 중 오류가 발생했습니다.');
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        // Only this side drops the request: the server finishes and saves, so
+        // the article is still reachable from the list. Said plainly rather
+        // than implying the work — or the charge — was undone.
+        showToast('success', '생성을 중단했습니다. 이미 시작된 글은 저장될 수 있습니다.');
+        fetchSavedPosts();
+      } else {
+        console.error('Error generating blog:', error);
+        showToast('error', '블로그 생성 중 오류가 발생했습니다.');
+      }
     } finally {
+      generatingBlogRef.current = false;
+      blogAbortRef.current = null;
       setGeneratingBlog(false);
     }
   };
+
+  const cancelBlogGeneration = () => blogAbortRef.current?.abort();
 
   const handleSaveEdit = async () => {
     if (!currentPostId) return;
 
     try {
+      // Placeholders become full markers again, taking each image's current
+      // wording from the cards — that is where descriptions are edited.
+      const contentToSave = fromEditableContent(editedContent, imagePrompts);
+
       const response = await fetch('/api/blog-posts', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: currentPostId,
-          content: editedContent,
+          content: contentToSave,
         }),
       });
 
       if (response.ok) {
-        // Re-parse image prompts from edited content
-        const imageSuggestions: ImageSuggestion[] = parseImageSuggestions(editedContent);
+        // Re-parse image prompts from the saved content
+        const imageSuggestions: ImageSuggestion[] = parseImageSuggestions(contentToSave);
 
         // Update blog result and image prompts
-        setBlogResult({ ...blogResult!, content: editedContent, imageSuggestions });
+        setBlogResult({ ...blogResult!, content: contentToSave, imageSuggestions });
         setImagePrompts(imageSuggestions);
         setIsEditMode(false);
+        // The server now holds this text; the local safety net has done its job.
+        if (currentPostId) clearDraft(currentPostId);
+        setDraftAge(null);
         showToast('success', '저장되었습니다.');
         fetchSavedPosts();
       } else {
@@ -297,74 +528,76 @@ export default function DashboardPage() {
     }
   };
 
+  const restoreDraft = () => {
+    if (!currentPostId) return;
+    const draft = readDraft(currentPostId);
+    if (!draft) return;
+    setEditedContent(draft.content);
+    setIsEditMode(true);
+    setDraftAge(null);
+    showToast('success', '수정하던 내용을 불러왔습니다. 확인 후 저장해주세요.');
+  };
+
+  const discardDraft = () => {
+    if (currentPostId) clearDraft(currentPostId);
+    setDraftAge(null);
+  };
+
+  const deletePost = async (id: string) => {
+    try {
+      const response = await fetch('/api/blog-posts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const data = await response.json();
+
+      if (response.ok) {
+        clearDraft(id);
+        // Leave the result view if the post being read is the one removed.
+        if (currentPostId === id) {
+          setBlogResult(null);
+          setCurrentPostId(null);
+          setGeneratedImages([]);
+          setImagePrompts([]);
+        }
+        setSavedPosts((current) => current.filter((post) => post.id !== id));
+        showToast('success', '글이 삭제되었습니다.');
+      } else {
+        showToast('error', data.error || '글 삭제에 실패했습니다.');
+      }
+    } catch (error) {
+      console.error('Error deleting post:', error);
+      showToast('error', '글 삭제 중 오류가 발생했습니다.');
+    }
+  };
+
   const toggleEditMode = () => {
     if (isEditMode) {
-      // Cancel edit - revert to original
       setEditedContent(blogResult?.content || '');
+    } else {
+      // The editor works on placeholders, not raw markers.
+      setEditedContent(toEditableContent(blogResult?.content || ''));
     }
     setIsEditMode(!isEditMode);
   };
 
-  const handleGenerateImages = async () => {
-    // Use imagePrompts (limited to 5)
-    if (imagePrompts.length === 0) {
-      showToast('error', '이미지 프롬프트가 없습니다.');
-      return;
-    }
-
-    setGeneratingImages(true);
-
-    try {
-      const response = await fetch('/api/generate-images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          keywords: imagePrompts,
-          topic: currentTopic,
-          blogPostId: currentPostId,
-          imageProvider,
-          imageQuality,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setGeneratedImages(data.images);
-        // Refresh saved posts to update with newly generated images
-        fetchSavedPosts();
-      } else {
-        const errorData = await response.json();
-        console.error('Error response:', errorData);
-        if (errorData.code === 'MISSING_API_KEY') {
-          setApiKeyNotice(errorData.error);
-          fetchTenantInfo();
-        } else {
-          showToast('error', `이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
-        }
-      }
-    } catch (error) {
-      console.error('Error generating images:', error);
-      showToast('error', '이미지 생성 중 오류가 발생했습니다.');
-    } finally {
-      setGeneratingImages(false);
-    }
-  };
-
-  // Overwriting an existing image needs confirmation; generating into an
-  // empty slot doesn't. The dialog is driven by pendingRegenIndex.
-  const handleRegenerateImage = (index: number) => {
-    if (generatedImages[index]) {
-      setPendingRegenIndex(index);
-      return;
-    }
-    void regenerateImage(index);
-  };
-
-  const regenerateImage = async (index: number) => {
+  /**
+   * Generates one slot. Shared by the batch and by single regeneration.
+   *
+   * State is updated through the functional form deliberately: the batch runs
+   * these in parallel, and `[...generatedImages]` from the enclosing scope
+   * would capture the array as it looked when the call started, so the last
+   * response to land would erase every image that arrived before it.
+   */
+  const generateSingleImage = async (index: number): Promise<boolean> => {
     const prompt = imagePrompts[index];
+    if (!prompt) return false;
+    // Same reasoning as the article guard, per slot.
+    if (inFlightImageIndices.current.has(index)) return false;
+    inFlightImageIndices.current.add(index);
 
-    // Add index to regenerating set
-    setRegeneratingIndices(prev => new Set(prev).add(index));
+    setRegeneratingIndices((prev) => new Set(prev).add(index));
 
     try {
       const response = await fetch('/api/generate-images', {
@@ -388,34 +621,102 @@ export default function DashboardPage() {
 
       if (response.ok) {
         const data = await response.json();
-        const newImages = [...generatedImages];
-        newImages[index] = data.image;
-        setGeneratedImages(newImages);
-      } else {
-        const errorData = await response.json();
-        console.error('Error response:', errorData);
-        if (errorData.code === 'MISSING_API_KEY') {
-          setApiKeyNotice(errorData.error);
-          fetchTenantInfo();
-        } else {
-          showToast('error', `이미지 재생성에 실패했습니다. ${errorData.error || ''}`.trim());
-        }
+        setGeneratedImages((prev) => {
+          const next = [...prev];
+          next[index] = data.image;
+          return next;
+        });
+        return true;
       }
+
+      const errorData = await response.json();
+      console.error('Error response:', errorData);
+      if (errorData.code === 'MISSING_API_KEY') {
+        setApiKeyNotice(errorData.error);
+        fetchTenantInfo();
+      } else {
+        // Record the failure on the slot as well as in a toast: the card is
+        // where the user looks to see which image is missing and why.
+        setGeneratedImages((prev) => {
+          const next = [...prev];
+          next[index] = {
+            keyword: imagePrompts[index]?.description ?? '',
+            url: '',
+            prompt: '',
+            type: imagePrompts[index]?.type,
+            error: errorData.error || '이미지 생성에 실패했습니다.',
+          };
+          return next;
+        });
+        showToast('error', `${index + 1}번 이미지 생성에 실패했습니다. ${errorData.error || ''}`.trim());
+      }
+      return false;
     } catch (error) {
-      console.error('Error regenerating image:', error);
-      showToast('error', '이미지 재생성 중 오류가 발생했습니다.');
+      console.error('Error generating image:', error);
+      showToast('error', `${index + 1}번 이미지 생성 중 오류가 발생했습니다.`);
+      return false;
     } finally {
-      // Remove index from regenerating set
-      setRegeneratingIndices(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(index);
-        return newSet;
+      inFlightImageIndices.current.delete(index);
+      setRegeneratingIndices((prev) => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
       });
     }
   };
 
-  // Confirms inline on the button itself rather than interrupting with a
-  // dialog for what is a trivially reversible action.
+  /**
+   * The batch is N parallel single-image requests rather than one request that
+   * makes N images. Two reasons, both user-visible: each image appears the
+   * moment it is ready instead of all five landing together after four
+   * minutes, and each gets its own serverless time budget — a five-image High
+   * batch no longer has to fit inside one function's limit.
+   */
+  const handleGenerateImages = async () => {
+    if (imagePrompts.length === 0) {
+      showToast('error', '이미지 프롬프트가 없습니다.');
+      return;
+    }
+    // The per-slot guards below already stop duplicates reaching the API, but
+    // returning early keeps the progress counter honest.
+    if (inFlightImageIndices.current.size > 0) return;
+
+    setGeneratingImages(true);
+    setImageProgress({ done: 0, total: imagePrompts.length });
+
+    try {
+      const results = await Promise.all(
+        imagePrompts.map((_, index) =>
+          generateSingleImage(index).then((ok) => {
+            setImageProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+            return ok;
+          })
+        )
+      );
+
+      const failed = results.filter((ok) => !ok).length;
+      if (failed === 0) {
+        showToast('success', `이미지 ${results.length}장을 만들었습니다.`);
+      }
+      fetchSavedPosts();
+    } finally {
+      setGeneratingImages(false);
+      setImageProgress(null);
+    }
+  };
+
+  // Overwriting an existing image needs confirmation; generating into an
+  // empty slot doesn't. The dialog is driven by pendingRegenIndex.
+  const handleRegenerateImage = (index: number) => {
+    if (generatedImages[index]) {
+      setPendingRegenIndex(index);
+      return;
+    }
+    void regenerateImage(index);
+  };
+
+  // Single regeneration is the same call the batch makes for one slot.
+  const regenerateImage = (index: number) => generateSingleImage(index);
   const handleCopyAll = async () => {
     if (!blogResult?.content) return;
     try {
@@ -476,6 +777,49 @@ export default function DashboardPage() {
             : 'max-w-6xl py-8'
         }`}
       >
+        {generatingBlog && (
+          /* Inline rather than a full-screen overlay: a 90-second block on
+             the whole page stops the user reading their own saved posts,
+             and told them nothing the page could not say in place. */
+          <div
+            role="status"
+            aria-live="polite"
+            className="sticky top-4 z-30 mb-6 bg-surface rounded-card shadow-card p-6 border border-accent/40"
+          >
+            <div className="flex items-start gap-4">
+              <svg
+                aria-hidden="true"
+                className="animate-spin h-6 w-6 shrink-0 text-accent mt-0.5"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <div className="min-w-0">
+                <p className="text-ink font-medium">
+                  &ldquo;{currentTopic}&rdquo; 글을 생성하고 있습니다
+                </p>
+                <p className="mt-1 text-sm text-ink-soft tabular-nums">
+                  {elapsed}초 경과 · 보통 30~90초 걸립니다
+                </p>
+                <p className="mt-2 text-xs text-ink-faint">
+                  {elapsed > 90
+                    ? '자료를 여러 번 검색하는 주제는 더 걸립니다. 창을 닫아도 글은 저장되며, 저장된 글 목록에서 확인할 수 있습니다.'
+                    : '이 화면을 벗어나도 글은 저장됩니다.'}
+                </p>
+              </div>
+              <button
+                onClick={cancelBlogGeneration}
+                className={`${btnSecondary} shrink-0 px-4 py-2 text-sm`}
+              >
+                중단
+              </button>
+            </div>
+          </div>
+        )}
+
         {(apiKeyNotice || (keysLoaded && !hasKey('anthropic'))) && (
           <div className="mb-6 bg-yellow-50 border border-yellow-200 rounded-card px-5 py-4 flex items-start justify-between gap-4 flex-wrap">
             <div>
@@ -496,6 +840,10 @@ export default function DashboardPage() {
 
         {!blogResult ? (
           <>
+            {onboardingSteps && (
+              <OnboardingChecklist steps={onboardingSteps} onNavigate={(href) => router.push(href)} />
+            )}
+
             {/* Greeting */}
             <div className="bg-surface rounded-card shadow-card p-6 mb-6">
               <h2 className="text-xl font-semibold mb-2">
@@ -512,7 +860,7 @@ export default function DashboardPage() {
                 <h3 className="text-lg font-semibold">AI 주제 추천</h3>
                 <button
                   onClick={fetchTopicRecommendations}
-                  disabled={loadingTopics}
+                  disabled={loadingTopics || generatingBlog}
                   className={`${btnPrimary} px-4 py-2`}
                 >
                   {loadingTopics ? '추천 중...' : '주제 추천 받기'}
@@ -531,10 +879,11 @@ export default function DashboardPage() {
                           <button
                             key={idx}
                             onClick={() => generateBlog(topic)}
-                            className={`w-full text-left px-4 py-3 rounded-xl transition-colors text-ink ${
+                            disabled={generatingBlog}
+                            className={`w-full text-left px-4 py-3 rounded-xl transition-colors text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
                               categoryIndex % 2 === 0
-                                ? 'bg-paper hover:bg-accent-tint border border-line'
-                                : 'bg-accent-tint hover:bg-line'
+                                ? 'bg-paper hover:bg-accent-tint border border-line disabled:hover:bg-paper'
+                                : 'bg-accent-tint hover:bg-line disabled:hover:bg-accent-tint'
                             }`}
                           >
                             {topic}
@@ -559,8 +908,11 @@ export default function DashboardPage() {
                   value={customTopic}
                   onChange={(e) => setCustomTopic(e.target.value)}
                   placeholder="원하는 주제를 입력하세요"
-                  className="flex-1 px-4 py-3 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent"
-                  onKeyDown={(e) => e.key === 'Enter' && customTopic && generateBlog(customTopic)}
+                  disabled={generatingBlog}
+                  className="flex-1 px-4 py-3 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent disabled:opacity-50"
+                  onKeyDown={(e) =>
+                    e.key === 'Enter' && customTopic && !generatingBlog && generateBlog(customTopic)
+                  }
                 />
                 <button
                   onClick={() => customTopic && generateBlog(customTopic)}
@@ -573,50 +925,145 @@ export default function DashboardPage() {
             </div>
 
             {/* Saved Posts */}
-            {savedPosts.length > 0 && (
+            {(savedPosts.length > 0 || postSearch) && (
               <div className="bg-surface rounded-card shadow-card p-6">
-                <h3 className="text-lg font-semibold mb-4">저장된 글 (최근 10개)</h3>
-                <div className="space-y-2">
-                  {savedPosts.map((post) => (
-                    <button
-                      key={post.id}
-                      onClick={() => loadSavedPost(post)}
-                      className="w-full text-left px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
-                    >
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <h4 className="font-medium text-ink">{post.title}</h4>
-                          <p className="text-sm text-ink-faint mt-1">{post.topic}</p>
-                        </div>
-                        <span className="text-xs text-ink-faint ml-4">
-                          {new Date(post.created_at).toLocaleDateString('ko-KR')}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
+                <div className="flex items-baseline justify-between gap-3 flex-wrap mb-4">
+                  <h3 className="text-lg font-semibold">
+                    저장된 글
+                    {postsTotal > 0 && (
+                      <span className="ml-2 text-sm font-normal text-ink-faint tabular-nums">
+                        {postsTotal}개
+                      </span>
+                    )}
+                  </h3>
+                  <input
+                    id="post-search"
+                    type="search"
+                    value={postSearch}
+                    onChange={(e) => {
+                      setPostSearch(e.target.value);
+                      fetchSavedPosts({ search: e.target.value, offset: 0 });
+                    }}
+                    placeholder="제목이나 주제로 검색"
+                    aria-label="저장된 글 검색"
+                    className="w-full sm:w-64 px-3 py-2 border border-line-strong rounded-lg text-sm focus:ring-2 focus:ring-accent"
+                  />
                 </div>
+
+                {savedPosts.length === 0 ? (
+                  <p className="text-sm text-ink-faint py-6 text-center">
+                    &ldquo;{postSearch}&rdquo;와 일치하는 글이 없습니다.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {savedPosts.map((post) => {
+                      const expected = post.expectedImages ?? 0;
+                      const made = post.imageCount ?? 0;
+                      return (
+                        <div
+                          key={post.id}
+                          className="flex items-start gap-2 px-4 py-3 border border-line hover:border-accent hover:bg-accent-tint rounded-lg transition-colors"
+                        >
+                          {/* The row and the delete control are siblings: a
+                              button cannot legally contain another button. */}
+                          <button
+                            onClick={() => loadSavedPost(post)}
+                            className="flex-1 min-w-0 text-left"
+                          >
+                            <h4 className="font-medium text-ink truncate">{post.title}</h4>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
+                              <p className="text-sm text-ink-faint truncate">{post.topic}</p>
+                              {/* State the list could not show before: what is
+                                  finished and what still needs work. */}
+                              {expected > 0 && (
+                                <span
+                                  className={`text-xs px-1.5 py-0.5 rounded ${
+                                    made >= expected
+                                      ? 'bg-green-50 text-green-700'
+                                      : 'bg-accent-tint text-accent-strong'
+                                  }`}
+                                >
+                                  이미지 {made}/{expected}
+                                </span>
+                              )}
+                              {post.posted_to_blog && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-green-50 text-green-700">
+                                  발행 완료
+                                </span>
+                              )}
+                              {post.cost?.totalUsd != null && (
+                                <span className="text-xs text-ink-faint tabular-nums">
+                                  {formatUsd(post.cost.totalUsd)}
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-xs text-ink-faint tabular-nums">
+                              {new Date(post.created_at).toLocaleDateString('ko-KR')}
+                            </span>
+                            <button
+                              onClick={() => setPendingDeleteId(post.id)}
+                              aria-label={`${post.title} 삭제`}
+                              className="rounded px-2 py-1 text-sm text-ink-faint hover:bg-red-50 hover:text-red-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                            >
+                              삭제
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {postsHasMore && (
+                  <button
+                    onClick={loadMorePosts}
+                    disabled={loadingMorePosts}
+                    className={`${btnSecondary} w-full mt-3 py-2 text-sm`}
+                  >
+                    {loadingMorePosts
+                      ? '불러오는 중...'
+                      : `더 보기 (${savedPosts.length}/${postsTotal})`}
+                  </button>
+                )}
               </div>
             )}
 
-            {generatingBlog && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-surface rounded-lg p-8 max-w-sm">
-                  <div className="flex flex-col items-center">
-                    <svg className="animate-spin h-12 w-12 text-accent mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <p className="text-ink font-medium">블로그 글을 생성하고 있습니다...</p>
-                  </div>
-                </div>
-              </div>
-            )}
           </>
         ) : (
           /* Blog Result */
           <div className="space-y-6 lg:space-y-0 lg:flex lg:flex-col lg:flex-1 lg:min-h-0 lg:gap-4">
             {/* Toolbar is pinned above both columns so it stays reachable
                 no matter how far either one is scrolled. */}
+            {draftAge && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-card px-5 py-4 flex items-center justify-between gap-4 flex-wrap">
+                <p className="text-sm text-yellow-900">
+                  저장하지 않은 수정본이 있습니다 ({draftAge} 작성).
+                </p>
+                <div className="flex gap-2 shrink-0">
+                  <button onClick={restoreDraft} className={`${btnPrimary} px-4 py-2 text-sm`}>
+                    이어서 수정
+                  </button>
+                  <button onClick={discardDraft} className={`${btnSecondary} px-4 py-2 text-sm`}>
+                    버리기
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {postCost?.totalUsd !== null && postCost !== null && (
+              <div className="flex items-baseline gap-2 text-sm text-ink-soft">
+                <span>이 글에 든 비용</span>
+                <span className="font-semibold text-ink tabular-nums">
+                  {formatUsd(postCost.totalUsd)}
+                </span>
+                <span className="text-xs text-ink-faint">
+                  (본문 {formatUsd(postCost.textUsd)} + 이미지 {formatUsd(postCost.imageUsd)})
+                </span>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-3">
               {currentPostId && (
                 <>
@@ -653,9 +1100,35 @@ export default function DashboardPage() {
               </button>
             </div>
 
+            {/* On a phone the two panes stacked meant scrolling the whole
+                article to reach the images — the common case being a quick
+                check between appointments. Below lg they become tabs; from lg
+                up both are visible and the switcher is hidden. */}
+            {imagePrompts.length > 0 && (
+              <div className="lg:hidden flex gap-1 p-1 bg-accent-tint rounded-lg" role="tablist">
+                {([
+                  ['article', '본문'],
+                  ['images', `이미지 (${generatedImages.filter(Boolean).length}/${imagePrompts.length})`],
+                ] as const).map(([pane, label]) => (
+                  <button
+                    key={pane}
+                    role="tab"
+                    aria-selected={mobilePane === pane}
+                    onClick={() => setMobilePane(pane)}
+                    className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                      mobilePane === pane
+                        ? 'bg-surface text-ink shadow-sm'
+                        : 'text-ink-soft hover:text-ink'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Article left, images right, each scrolling on its own so the
-                two can be read against each other. Below lg they stack and
-                the page scrolls as one. */}
+                two can be read against each other. */}
             <div
               className={`space-y-6 lg:space-y-0 lg:grid lg:gap-14 lg:flex-1 lg:min-h-0 ${
                 imagePrompts.length > 0
@@ -663,15 +1136,25 @@ export default function DashboardPage() {
                   : 'lg:grid-cols-1'
               }`}
             >
-              <div className="lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+              <div
+                className={`lg:min-h-0 lg:overflow-y-auto lg:pr-1 lg:block ${
+                  imagePrompts.length > 0 && mobilePane !== 'article' ? 'hidden' : ''
+                }`}
+              >
               <div className="bg-surface rounded-card shadow-card p-8">
                 {isEditMode ? (
-                  <textarea
-                    value={editedContent}
-                    onChange={(e) => setEditedContent(e.target.value)}
-                    className="w-full min-h-[600px] p-4 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent font-mono text-sm"
-                    placeholder="글 내용을 편집하세요..."
-                  />
+                  <>
+                    <textarea
+                      value={editedContent}
+                      onChange={(e) => setEditedContent(e.target.value)}
+                      className="w-full min-h-[600px] p-4 border border-line-strong rounded-lg focus:ring-2 focus:ring-accent font-mono text-sm"
+                      placeholder="글 내용을 편집하세요..."
+                    />
+                    <p className="mt-2 text-xs text-ink-faint">
+                      ⟦이미지 1⟧ 표시는 그 자리에 이미지가 들어간다는 뜻입니다.
+                      옮기면 위치가 바뀌고, 지우면 그 이미지는 본문에 들어가지 않습니다.
+                    </p>
+                  </>
                 ) : (
                   // Serif at a constrained measure: this is the one place the
                   // tenant reads the article as a reader would, so awkward
@@ -686,12 +1169,23 @@ export default function DashboardPage() {
               </div>
               </div>
 
-              <div className="lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+              <div
+                className={`lg:min-h-0 lg:overflow-y-auto lg:pr-1 lg:block ${
+                  mobilePane !== 'images' ? 'hidden' : ''
+                }`}
+              >
               {/* Image Prompts Section */}
               {imagePrompts.length > 0 && (
                 <div className="bg-accent-tint border border-line rounded-card p-6">
                   <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
-                    <h3 className="font-semibold text-accent-strong">이미지 프롬프트 ({imagePrompts.length}/5)</h3>
+                    <h3 className="font-semibold text-accent-strong">
+                      이미지 프롬프트 ({imagePrompts.length}/5)
+                      {imageProgress && (
+                        <span className="ml-3 font-normal text-sm text-ink-soft tabular-nums">
+                          {imageProgress.done}/{imageProgress.total}장 완료 · {elapsed}초
+                        </span>
+                      )}
+                    </h3>
                     {/* flex-wrap: two selects plus two buttons overflow narrow
                         viewports without it. */}
                     <div className="flex flex-wrap items-center gap-3">
@@ -705,7 +1199,10 @@ export default function DashboardPage() {
                         <option value="openai">GPT-Image-2 (OpenAI)</option>
                         <option value="gemini">Gemini 3 Pro Image (Google)</option>
                       </select>
-                      {/* Quality selector — OpenAI only */}
+                      {/* Quality selector — OpenAI only. Priced for the
+                          number of slots actually queued: High is ~36x Low,
+                          and a dropdown that shows only the duration hides
+                          the decision that costs money. */}
                       {imageProvider === 'openai' && (
                         <select
                           aria-label="이미지 품질"
@@ -713,9 +1210,18 @@ export default function DashboardPage() {
                           onChange={(e) => setImageQuality(e.target.value as 'low' | 'medium' | 'high')}
                           className="px-3 py-2 border border-line-strong rounded-lg text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-accent"
                         >
-                          <option value="low">Low (~30초)</option>
-                          <option value="medium">Medium (~80초)</option>
-                          <option value="high">High (~250초)</option>
+                          {(['low', 'medium', 'high'] as const).map((tier) => {
+                            const seconds = { low: 30, medium: 80, high: 250 }[tier];
+                            const estimate = calculateImageCost('openai', imagePrompts.length, tier);
+                            return (
+                              <option key={tier} value={tier}>
+                                {tier === 'low' ? 'Low' : tier === 'medium' ? 'Medium' : 'High'}
+                                {` (~${seconds}초`}
+                                {estimate !== null ? ` · ${formatUsd(estimate)}` : ''}
+                                {')'}
+                              </option>
+                            );
+                          })}
                         </select>
                       )}
                       <button
@@ -723,7 +1229,11 @@ export default function DashboardPage() {
                         disabled={generatingImages}
                         className={`${btnPrimary} px-4 py-2 text-sm`}
                       >
-                        {generatingImages ? '생성 중...' : '전체 생성'}
+                        {generatingImages && imageProgress
+                          ? `생성 중 ${imageProgress.done}/${imageProgress.total}`
+                          : generatingImages
+                            ? '생성 중...'
+                            : '전체 생성'}
                       </button>
                       <button
                         onClick={() => setEditingPrompts(!editingPrompts)}
@@ -735,7 +1245,13 @@ export default function DashboardPage() {
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {imagePrompts.map((prompt, index) => {
-                      const image = generatedImages[index];
+                      const entry = generatedImages[index];
+                      // An entry can exist without a usable URL: a slot that
+                      // failed or timed out still gets one, carrying its error.
+                      // `<Image src="">` throws, so presence of the object is
+                      // not presence of an image.
+                      const image = entry?.url ? entry : undefined;
+                      const slotError = !image ? entry?.error : undefined;
                       const isRegenerating = regeneratingIndices.has(index);
 
                       return (
@@ -847,8 +1363,20 @@ export default function DashboardPage() {
                                 />
                               </div>
                             ) : (
-                              <div className="w-full aspect-square bg-accent-tint rounded-lg flex items-center justify-center border-2 border-dashed border-line-strong">
-                                <p className="text-ink-faint text-sm text-center px-2">이미지 없음</p>
+                              <div
+                                className={`w-full aspect-square rounded-lg flex items-center justify-center border-2 border-dashed px-3 ${
+                                  slotError
+                                    ? 'bg-red-50 border-red-200'
+                                    : 'bg-accent-tint border-line-strong'
+                                }`}
+                              >
+                                <p
+                                  className={`text-sm text-center break-keep ${
+                                    slotError ? 'text-red-700' : 'text-ink-faint'
+                                  }`}
+                                >
+                                  {slotError ?? '이미지 없음'}
+                                </p>
                               </div>
                             )}
                             <div className="flex flex-col gap-2">
@@ -891,6 +1419,18 @@ export default function DashboardPage() {
         )}
       </main>
 
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="이 글을 삭제할까요?"
+        message="글과 함께 생성된 이미지도 모두 삭제됩니다. 되돌릴 수 없습니다."
+        confirmLabel="삭제"
+        onConfirm={() => {
+          const id = pendingDeleteId;
+          setPendingDeleteId(null);
+          if (id) void deletePost(id);
+        }}
+        onCancel={() => setPendingDeleteId(null)}
+      />
       <ConfirmDialog
         open={pendingRegenIndex !== null}
         title="이미지를 다시 생성할까요?"

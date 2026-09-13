@@ -33,7 +33,18 @@ export default function SettingsPage() {
   const [blogPassword, setBlogPassword] = useState('');
   const [blogBoardName, setBlogBoardName] = useState('');
 
-  const [missingFields, setMissingFields] = useState<string[]>([]);
+  // Computed from what is in the form right now, so the count moves as the
+  // user types. missingFields above still reflects the last load — it is what
+  // greets someone arriving with an empty profile.
+  const requiredNow = [
+    { label: terminology.tenantNameLabel, filled: !!tenantName.trim() },
+    { label: terminology.servicesLabel, filled: mainServices.length > 0 },
+    { label: '주소', filled: !!address.trim() },
+    { label: '블로그 ID', filled: !!blogId.trim() },
+    { label: '게시판 이름', filled: !!blogBoardName.trim() },
+  ];
+  const filledCount = requiredNow.filter((field) => field.filled).length;
+  const allFilled = filledCount === requiredNow.length;
 
   const fetchSettings = async () => {
     try {
@@ -56,16 +67,6 @@ export default function SettingsPage() {
         setBlogId(h.blog_id || '');
         setBlogBoardName(h.blog_board_name || '');
 
-        // Check missing fields
-        const missing = [];
-        if (!h.name) missing.push(tenantPack.terminology.tenantNameLabel);
-        if (!h.main_services || h.main_services.length === 0) {
-          missing.push(tenantPack.terminology.servicesLabel);
-        }
-        if (!h.address) missing.push('주소');
-        if (!h.blog_id) missing.push('블로그 ID');
-        if (!h.blog_board_name) missing.push('게시판 이름');
-        setMissingFields(missing);
       } else if (response.status === 401) {
         router.push('/login');
       }
@@ -167,16 +168,26 @@ export default function SettingsPage() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-8">
-        {missingFields.length > 0 && (
+        {!allFilled && (
           <div className="mb-6 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <p className="font-semibold text-yellow-800 mb-2">
-              다음 항목을 입력해주세요:
-            </p>
-            <ul className="list-disc list-inside text-yellow-700">
-              {missingFields.map(field => (
-                <li key={field}>{field}</li>
-              ))}
+            <div className="flex items-baseline justify-between gap-3 flex-wrap mb-2">
+              <p className="font-semibold text-yellow-900">
+                아직 입력하지 않은 항목이 있습니다
+              </p>
+              <span className="text-sm text-yellow-800 tabular-nums">
+                {filledCount}/{requiredNow.length} 완료
+              </span>
+            </div>
+            <ul className="list-disc list-inside text-yellow-800 text-sm">
+              {requiredNow
+                .filter((field) => !field.filled)
+                .map((field) => (
+                  <li key={field.label}>{field.label}</li>
+                ))}
             </ul>
+            <p className="mt-2 text-xs text-yellow-700">
+              모두 채우면 글에 {terminology.tenantNoun} 정보가 반영됩니다.
+            </p>
           </div>
         )}
 
@@ -191,6 +202,11 @@ export default function SettingsPage() {
             {error}
           </div>
         )}
+
+        {/* Above the profile form while a key is missing: without one nothing
+            on this product works, so it must not sit below a long form the
+            user has no reason to read yet. */}
+        <ApiKeySettings position="top" />
 
         <form onSubmit={handleSave} className="bg-surface rounded-card shadow-card p-8 space-y-6">
           <div>
@@ -395,11 +411,15 @@ export default function SettingsPage() {
             disabled={saving}
             className={`${btnPrimary} w-full py-3`}
           >
-            {saving ? '저장 중...' : '설정 저장'}
+            {saving
+              ? '저장 중...'
+              : allFilled
+                ? '설정 저장'
+                : `설정 저장 (${filledCount}/${requiredNow.length} 입력됨)`}
           </button>
         </form>
 
-        <ApiKeySettings />
+        <ApiKeySettings position="bottom" />
       </main>
     </div>
   );

@@ -23,8 +23,18 @@ const PROVIDER_HELP: Record<KeyStatus['provider'], { where: string; url: string 
  * must not touch a stored key — the API treats an omitted field as "leave it"
  * and an empty string as "delete it", and this component is what makes that
  * distinction visible.
+ *
+ * `position` lets the settings page mount this in both slots and let the
+ * component decide which one renders: a tenant with no key has nothing else to
+ * do on that page, so the card goes first; once every key is stored it drops
+ * below the profile form, where a rarely-touched setting belongs. Only one slot
+ * ever renders, so there is never a duplicate.
  */
-export default function ApiKeySettings() {
+export default function ApiKeySettings({
+  position = 'bottom',
+}: {
+  position?: 'top' | 'bottom';
+}) {
   const [statuses, setStatuses] = useState<KeyStatus[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -93,8 +103,15 @@ export default function ApiKeySettings() {
 
   if (loading) return null;
 
+  const anyMissing = statuses.some((status) => !status.configured);
+  if (position === 'top' ? !anyMissing : anyMissing) return null;
+
   return (
-    <section className="mt-8 bg-surface rounded-card shadow-card p-8">
+    <section
+      className={`bg-surface rounded-card shadow-card p-8 ${
+        position === 'top' ? 'mb-6 ring-1 ring-accent/30' : 'mt-8'
+      }`}
+    >
       <h2 className="text-xl font-bold text-ink mb-1">API 키</h2>
       <p className="text-sm text-ink-soft mb-6">
         글과 이미지 생성에는 본인이 발급받은 API 키가 필요합니다. 키를 등록해야

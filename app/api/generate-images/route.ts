@@ -31,6 +31,39 @@ const IMAGE_MODELS: Record<string, string> = {
 
 export const maxDuration = 300; // 5 minutes for High quality generation
 
+// The platform kills the function at maxDuration with no response at all, so a
+// batch that runs right up to the edge loses even the images that finished.
+// Stop short of it and answer with what is done.
+//
+// Images are saved to Storage and blog_images as each one lands, so a timeout
+// is never total loss — but only if we get to say so. Past this deadline the
+// still-running generations keep going and keep saving; the client is told to
+// reload rather than being left with a dead request.
+//
+// ⚠ maxDuration is what THIS code asks for. The deployment's plan is what it
+// gets: Vercel's Hobby tier caps functions far lower, and there High quality
+// cannot finish at all. Set IMAGE_DEADLINE_MS below the real cap if the plan
+// allows less than 300s.
+const RESPONSE_MARGIN_MS = 20_000;
+const IMAGE_DEADLINE_MS =
+  Number(process.env.IMAGE_DEADLINE_MS) || maxDuration * 1000 - RESPONSE_MARGIN_MS;
+
+interface TimedOut {
+  timedOut: true;
+}
+
+/** Resolves with the promise's value, or a marker once the deadline passes. */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | TimedOut> {
+  return Promise.race([
+    promise,
+    new Promise<TimedOut>((resolve) => setTimeout(() => resolve({ timedOut: true }), ms)),
+  ]);
+}
+
+function isTimedOut(value: unknown): value is TimedOut {
+  return typeof value === 'object' && value !== null && 'timedOut' in value;
+}
+
 const VALID_IMAGE_TYPES: readonly ImageType[] = IMAGE_TYPES;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TEXT_LENGTH = 200;
@@ -89,6 +122,49 @@ async function loadTenantImageContext(tenantId: string): Promise<TenantImageCont
   };
 }
 
+/**
+ * Removes the images a replacement has superseded — every row in this slot
+ * except the one just written.
+ *
+ * Called after the new image is stored, never before. Ordering is the whole
+ * point: a tenant pays for each generation, so an image is only discarded once
+ * something has actually replaced it.
+ */
+async function retireSupersededImages(
+  blogPostId: string,
+  displayOrder: number,
+  keepStoragePath: string
+): Promise<void> {
+  const { data: existing, error } = await supabaseAdmin
+    .from('blog_images')
+    .select('id, storage_path')
+    .eq('blog_post_id', blogPostId)
+    .eq('display_order', displayOrder);
+
+  if (error) {
+    console.error('[generate-images] could not list superseded images', error);
+    return;
+  }
+
+  const superseded = (existing ?? []).filter((image) => image.storage_path !== keepStoragePath);
+  if (superseded.length === 0) return;
+
+  const { error: storageError } = await supabaseAdmin.storage
+    .from('blog-images')
+    .remove(superseded.map((image) => image.storage_path));
+  if (storageError) {
+    console.error('[generate-images] could not remove superseded files', storageError);
+  }
+
+  const { error: rowError } = await supabaseAdmin
+    .from('blog_images')
+    .delete()
+    .in('id', superseded.map((image) => image.id));
+  if (rowError) {
+    console.error('[generate-images] could not remove superseded rows', rowError);
+  }
+}
+
 // Confirms the caller's session actually owns the blog post before allowing
 // writes/deletes against its images (prevents cross-tenant tampering).
 async function verifyBlogPostOwnership(blogPostId: string, tenantId: string): Promise<boolean> {
@@ -111,9 +187,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
     }
 
+    // One request per image now that the client fans a batch out, so the
+    // budget is counted in images rather than batches: 120/hour is 24 full
+    // five-image posts, well past any real session.
     const { allowed, retryAfterSeconds } = checkRateLimit(
       `generate-images:${sessionData.id}`,
-      30,
+      120,
       60 * 60 * 1000
     );
     if (!allowed) {
@@ -125,10 +204,19 @@ export async function POST(request: NextRequest) {
 
     const { keywords, topic, description, text, type: requestedType, index, blogPostId, replaceExisting, promptId, imageProvider: providerOverride, imageQuality } = await request.json();
 
-    if (blogPostId !== undefined && blogPostId !== null) {
-      if (typeof blogPostId !== 'string' || !(await verifyBlogPostOwnership(blogPostId, sessionData.id))) {
-        return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
-      }
+    // Checked before any provider call, because an image generated without a
+    // post to attach it to is billed and then lost — Storage and blog_images
+    // are both keyed by the post. It used to be generated anyway and returned
+    // as a success carrying an empty url, which the client then tried to
+    // render.
+    if (typeof blogPostId !== 'string' || !blogPostId) {
+      return NextResponse.json(
+        { error: '글을 먼저 저장한 뒤 이미지를 생성할 수 있습니다.', code: 'NO_BLOG_POST' },
+        { status: 400 }
+      );
+    }
+    if (!(await verifyBlogPostOwnership(blogPostId, sessionData.id))) {
+      return NextResponse.json({ error: '권한이 없습니다.' }, { status: 403 });
     }
 
     // Loaded once for the whole request — both the single-image and batch paths
@@ -163,45 +251,13 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: '이미지 타입이 올바르지 않습니다.' }, { status: 400 });
       }
 
-      // If replaceExisting is true, delete old image first
-      if (replaceExisting && blogPostId && index !== undefined) {
-        try {
-          // Find and delete existing image with same blog_post_id and display_order
-          const { data: existingImages, error: fetchError } = await supabaseAdmin
-            .from('blog_images')
-            .select('id, storage_path')
-            .eq('blog_post_id', blogPostId)
-            .eq('display_order', index);
-
-          if (fetchError) {
-            console.error('Error fetching existing images:', fetchError);
-          } else if (existingImages && existingImages.length > 0) {
-            for (const img of existingImages) {
-              // Delete from storage
-              const { error: storageError } = await supabaseAdmin.storage
-                .from('blog-images')
-                .remove([img.storage_path]);
-
-              if (storageError) {
-                console.error('Error deleting from storage:', storageError);
-              }
-
-              // Delete from database
-              const { error: dbError } = await supabaseAdmin
-                .from('blog_images')
-                .delete()
-                .eq('id', img.id);
-
-              if (dbError) {
-                console.error('Error deleting from database:', dbError);
-              }
-            }
-          }
-        } catch (deleteError) {
-          console.error('Error during image deletion:', deleteError);
-          // Continue with generation even if deletion fails
-        }
-      }
+      // The previous image is NOT removed here. It used to be — deleted
+      // before generation started — so a provider error or a timeout left the
+      // slot with neither the old image nor a new one, throwing away something
+      // already paid for to make room for something that never arrived.
+      //
+      // It is removed further down, after the replacement is safely uploaded
+      // and its metadata written.
 
       // The caller sends the type alongside the description; parseImageType is
       // only the fallback for the legacy "TYPE|description" encoding. Without
@@ -235,7 +291,16 @@ export async function POST(request: NextRequest) {
 
       const b64Image = result.imageData;
 
-      if (blogPostId && b64Image) {
+      if (!b64Image) {
+        // Billed but unusable. Say so rather than answering with an image
+        // object whose url is the empty string.
+        return NextResponse.json(
+          { error: '이미지 데이터를 받지 못했습니다. 다시 시도해주세요.' },
+          { status: 502 }
+        );
+      }
+
+      {
         try {
           const imageBuffer = Buffer.from(b64Image, 'base64');
           const finalImageUrl = await uploadImageFromBuffer(imageBuffer);
@@ -257,6 +322,12 @@ export async function POST(request: NextRequest) {
             promptId // Pass prompt ID
           );
 
+          // Only now is the old image redundant. Anything that fails above
+          // leaves it in place, which is the point.
+          if (replaceExisting) {
+            await retireSupersededImages(blogPostId, index, storagePath);
+          }
+
           return NextResponse.json({
             image: {
               keyword: cleanDescription,
@@ -275,15 +346,11 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      return NextResponse.json({
-        image: {
-          keyword: cleanDescription,
-          url: '',
-          prompt: prompt,
-          type: type,
-        },
-        index,
-      });
+      // Unreachable: every branch above either returns an image or an error.
+      return NextResponse.json(
+        { error: '이미지 생성에 실패했습니다.' },
+        { status: 500 }
+      );
     }
 
     // Batch image generation
@@ -366,11 +433,25 @@ export async function POST(request: NextRequest) {
       };
     });
 
-    const results = await Promise.allSettled(imagePromises);
+    // Deadline measured from here: the generation calls are what take the time.
+    const deadlineAt = Date.now() + IMAGE_DEADLINE_MS;
+    const results = await Promise.allSettled(
+      imagePromises.map((promise) =>
+        withDeadline(promise, Math.max(deadlineAt - Date.now(), 1_000))
+      )
+    );
+
+    const timedOutCount = results.filter(
+      (r) => r.status === 'fulfilled' && isTimedOut(r.value)
+    ).length;
 
     // One row for the batch, counting only the images the provider actually
-    // produced — a call that threw was not billed.
-    const generatedCount = results.filter((r) => r.status === 'fulfilled').length;
+    // produced — a call that threw was not billed. A timed-out one may still
+    // land and be billed; it is counted when the user reloads and the row for
+    // it is written by the request that finishes.
+    const generatedCount = results.filter(
+      (r) => r.status === 'fulfilled' && !isTimedOut(r.value)
+    ).length;
     if (generatedCount > 0) {
       await recordUsage({
         tenantId: sessionData.id,
@@ -386,20 +467,35 @@ export async function POST(request: NextRequest) {
 
     // A single failed image must not lose the ones that worked, so each
     // rejection becomes an error entry in its own slot.
-    const images = results.map((result, idx) =>
-      result.status === 'fulfilled'
-        ? result.value
-        : {
-            keyword: typeof keywords[idx] === 'string' ? keywords[idx] : keywords[idx]?.description ?? '',
-            text: '',
-            url: '',
-            prompt: '',
-            type: 'EXPLAINER',
-            error: '이미지 생성에 실패했습니다.',
-          }
-    );
+    const describeSlot = (idx: number) =>
+      typeof keywords[idx] === 'string' ? keywords[idx] : keywords[idx]?.description ?? '';
 
-    return NextResponse.json({ images });
+    const images = results.map((result, idx) => {
+      if (result.status === 'fulfilled' && !isTimedOut(result.value)) return result.value;
+
+      const stillRunning = result.status === 'fulfilled' && isTimedOut(result.value);
+      return {
+        keyword: describeSlot(idx),
+        text: '',
+        url: '',
+        prompt: '',
+        type: 'EXPLAINER',
+        error: stillRunning
+          ? '시간이 초과되었습니다. 생성은 계속 진행 중일 수 있으니 잠시 후 새로고침해주세요.'
+          : '이미지 생성에 실패했습니다.',
+      };
+    });
+
+    return NextResponse.json({
+      images,
+      ...(timedOutCount > 0
+        ? {
+            warning:
+              `${timedOutCount}장이 제한 시간 안에 끝나지 않았습니다. ` +
+              '품질을 낮추거나 장수를 줄이면 안정적으로 완료됩니다.',
+          }
+        : {}),
+    });
   } catch (error: unknown) {
     console.error('Error generating images:', error);
     const errorMessage = error instanceof Error ? error.message : '이미지 생성 중 오류가 발생했습니다.';

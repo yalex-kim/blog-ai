@@ -13,9 +13,9 @@ npm test         # Run vitest unit tests
 
 Vitest covers `lib/verticals/`, `lib/image-prompts.ts`, `lib/session.ts`,
 `lib/parse-image-suggestions.ts`, `lib/rate-limit.ts`,
-`lib/blog-credential-crypto.ts`, `lib/tenant-keys.ts`, `lib/pricing.ts`, and
-the reference-verification modules. There is no end-to-end/integration coverage
-for API routes or UI flows.
+`lib/blog-credential-crypto.ts`, `lib/tenant-keys.ts`, `lib/pricing.ts`,
+`lib/db-errors.ts`, and the reference-verification modules. There is no
+end-to-end/integration coverage for API routes or UI flows.
 
 ## Architecture
 
@@ -89,6 +89,13 @@ defense-in-depth against CSRF, and login/generation endpoints should call
    `{ content, imageKeywords, references, imageSuggestions[], blogPostId }`
 
 **Image generation** (`/api/generate-images`):
+0. A batch is N parallel single-image requests from the client, not one request
+   for N images. Each image then appears as it lands and gets its own function
+   budget — a five-image High batch cannot fit in one invocation on a low
+   plan. `IMAGE_DEADLINE_MS` stops a request short of `maxDuration` so partial
+   results are returned instead of the platform killing the response.
+   Regeneration retires the previous image only **after** the replacement is
+   stored: deleting first meant a failure lost both.
 1. Loads the tenant's pack, thumbnail branding and image-provider key in one
    round trip. The provider itself comes from the request — the dashboard's
    selector sits next to the generate button and sends it every time, so there
@@ -111,6 +118,12 @@ maps it so older posts still parse.
 
 INTRO and LIFESTYLE carry no `text` overlay (`hasTextOverlay: false`). Parsing
 lives in `lib/parse-image-suggestions.ts` — change the format there, not inline.
+
+The editor never shows the raw marker. `toEditableContent` swaps each one for
+`⟦이미지 N⟧` and `fromEditableContent` restores it on save, taking the wording
+from the image cards (where it is edited) rather than from the text. The marker
+cannot simply be hidden: its **position** is what says where the image belongs,
+so the placeholder stays visible and movable.
 
 ### Environment variables (`.env.local`)
 
@@ -199,6 +212,15 @@ numbers and never went missing, which is the whole point of storing them
 separately from the money. A stored cost still wins where it exists: it was
 computed with the rate in effect then, and restating past spend at today's
 prices would be its own kind of wrong.
+
+### Losing work
+
+Three guards, because the product's unit of work costs real money to produce:
+`lib/drafts.ts` keeps an unsaved edit in `localStorage` (every accessor
+wrapped — a private window costs the safety net, not the editor), a
+`beforeunload` handler covers a dirty edit and an in-flight generation, and
+`DELETE /api/blog-posts` clears Storage objects before the row, since
+`blog_images` cascades but the files behind it have no foreign key.
 
 ### Database setup
 

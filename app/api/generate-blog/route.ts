@@ -8,6 +8,7 @@ import { parseReferences } from '@/lib/parse-references';
 import { extractCitedSnippets } from '@/lib/extract-citations';
 import { extractArticleText } from '@/lib/extract-article-text';
 import { buildVerifiedReferences } from '@/lib/build-references';
+import { markdownLink } from '@/lib/markdown-link';
 import { getVertical } from '@/lib/verticals/registry';
 import {
   buildBlogSystemPrompt,
@@ -181,7 +182,11 @@ export async function POST(request: NextRequest) {
     if (references.length > 0) {
       const referencesMarkdown = [
         '## 참고자료',
-        ...references.map((ref) => `- [${ref.title}](${ref.url})`),
+        // Titles are real page titles from search results and contain
+        // brackets, pipes and angle brackets; URLs contain parentheses and
+        // query strings. Interpolating either raw produced lines that rendered
+        // as literal text with the URL showing.
+        ...references.map((ref) => `- ${markdownLink(ref.title, ref.url)}`),
       ].join('\n');
       content = `${content}\n\n${referencesMarkdown}`;
     }
